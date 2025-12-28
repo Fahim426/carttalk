@@ -1,29 +1,31 @@
 import React, { useState, useEffect, useRef } from 'react';
 
 function CallInterface({ callId, onEndCall }) {
-    const [transcript, setTranscript] = useState('Initializing...');
     const [status, setStatus] = useState('initializing'); // initializing, listening, speaking, processing, ai_speaking
+    const [messages, setMessages] = useState([]);
 
-    // Refs for audio handling
+    // Refs for audio
     const wsRef = useRef(null);
     const audioContextRef = useRef(null);
     const mediaStreamRef = useRef(null);
     const analyserRef = useRef(null);
     const silenceTimerRef = useRef(null);
     const isSpeakingRef = useRef(false);
-
-    // Audio processing constants
-    const VAD_THRESHOLD = 15; // Volume threshold (0-255)
-    const SILENCE_DURATION = 1500;
-
-    // Buffer to store audio chunks while speaking
+    const currentAudioRef = useRef(null);
     const audioChunksRef = useRef([]);
 
-    // Ref to track currently playing audio
-    const currentAudioRef = useRef(null);
+    const VAD_THRESHOLD = 15;
+    const SILENCE_DURATION = 1500;
+
+    // Scroll ref
+    const chatEndRef = useRef(null);
 
     useEffect(() => {
-        // 1. Setup WebSocket
+        // Scroll to bottom
+        chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, [messages, status]);
+
+    useEffect(() => {
         wsRef.current = new WebSocket(`ws://localhost:8000/api/call/${callId}/stream`);
 
         wsRef.current.onopen = () => {
@@ -32,27 +34,37 @@ function CallInterface({ callId, onEndCall }) {
         };
 
         wsRef.current.onmessage = (event) => {
-            console.log("Received AI Audio, size:", event.data.size);
+            // 1. Text Message (JSON)
+            if (typeof event.data === 'string') {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'transcript') {
+                        setMessages(prev => [...prev, { role: msg.role, text: msg.text }]);
+                    }
+                } catch (e) { console.error(e); }
+                return;
+            }
+
+            // 2. Audio Message (Binary)
             if (event.data.size === 0) {
-                setTranscript("Error: No audio from AI");
                 startListening();
                 return;
             }
 
             setStatus('ai_speaking');
-            setTranscript("AI is speaking...");
 
             const blob = new Blob([event.data], { type: 'audio/mp3' });
             const url = URL.createObjectURL(blob);
             const audio = new Audio(url);
-            currentAudioRef.current = audio; // Track current audio
+            currentAudioRef.current = audio;
+
+            audio.onprev = () => { }; // No-op
 
             audio.onended = () => {
                 currentAudioRef.current = null;
                 setIsSpeaking(false);
                 setStatus('listening');
                 startListening();
-                setTranscript("Listening...");
             };
 
             audio.play().catch(e => {
@@ -63,31 +75,21 @@ function CallInterface({ callId, onEndCall }) {
 
         wsRef.current.onerror = (e) => console.error("WS Error", e);
 
-        // Cleanup
-        return () => {
-            stopEverything();
-        };
+        return () => { stopEverything(); };
     }, [callId]);
 
-    const setIsSpeaking = (val) => {
-        isSpeakingRef.current = val;
-    }
+    const setIsSpeaking = (val) => { isSpeakingRef.current = val; }
 
     const startListening = async () => {
         try {
             if (audioContextRef.current?.state === 'suspended') {
                 await audioContextRef.current.resume();
             }
-
-            // If already set up, just resume logic
             if (mediaStreamRef.current) {
                 setStatus('listening');
-                setTranscript("Listening...");
                 detectVoiceActivity();
                 return;
             }
-
-            // Init Audio Context & Stream
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             mediaStreamRef.current = stream;
 
@@ -101,12 +103,10 @@ function CallInterface({ callId, onEndCall }) {
             analyserRef.current = analyser;
 
             setStatus('listening');
-            setTranscript("Listening...");
             detectVoiceActivity();
-
         } catch (e) {
-            console.error("Mic Access Error", e);
-            setTranscript("Microphone Access Denied");
+            console.error(e);
+            setMessages(prev => [...prev, { role: 'system', text: "Microphone Access Denied" }]);
         }
     };
 
@@ -114,7 +114,6 @@ function CallInterface({ callId, onEndCall }) {
         if (wsRef.current) wsRef.current.close();
         if (mediaStreamRef.current) mediaStreamRef.current.getTracks().forEach(t => t.stop());
         if (audioContextRef.current) audioContextRef.current.close();
-        // Stop any currently playing audio
         if (currentAudioRef.current) {
             currentAudioRef.current.pause();
             currentAudioRef.current = null;
@@ -122,55 +121,42 @@ function CallInterface({ callId, onEndCall }) {
         clearTimeout(silenceTimerRef.current);
     };
 
-    // VAD Loop
     const detectVoiceActivity = () => {
         if (!analyserRef.current) return;
         loop();
     };
 
     const loopRef = useRef(null);
-
     const loop = () => {
         if (!analyserRef.current) return;
-
         const bufferLength = analyserRef.current.frequencyBinCount;
         const dataArray = new Uint8Array(bufferLength);
         analyserRef.current.getByteFrequencyData(dataArray);
         const volume = dataArray.reduce((a, b) => a + b) / bufferLength;
 
-        // Determine if speaking based on threshold
         if (volume > VAD_THRESHOLD) {
             if (!isSpeakingRef.current) {
-                console.log("Speech Started");
                 isSpeakingRef.current = true;
                 setStatus('speaking');
-                setTranscript("I'm listening...");
                 startRecordingChunk();
             }
-            // Reset silence timer
             if (silenceTimerRef.current) {
                 clearTimeout(silenceTimerRef.current);
                 silenceTimerRef.current = null;
             }
         } else if (isSpeakingRef.current) {
-            // Speech explicitly ended
             if (!silenceTimerRef.current) {
                 silenceTimerRef.current = setTimeout(() => {
-                    console.log("Silence Detected -> Sending");
                     stopRecordingAndSend();
                     if (loopRef.current) cancelAnimationFrame(loopRef.current);
                     return;
                 }, SILENCE_DURATION);
             }
         }
-
         loopRef.current = requestAnimationFrame(loop);
     };
 
-
-    // Recorder Logic
     const recorderRef = useRef(null);
-
     const startRecordingChunk = () => {
         if (recorderRef.current && recorderRef.current.state !== 'inactive') return;
         try {
@@ -181,18 +167,13 @@ function CallInterface({ callId, onEndCall }) {
                 if (e.data.size > 0) audioChunksRef.current.push(e.data);
             };
             recorder.start();
-        } catch (e) {
-            console.error("Recorder start error", e);
-        }
+        } catch (e) { console.error(e); }
     };
 
     const stopRecordingAndSend = () => {
         if (!recorderRef.current) return;
-
         setStatus('processing');
-        setTranscript("Thinking...");
         isSpeakingRef.current = false;
-
         recorderRef.current.onstop = () => {
             const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -200,54 +181,77 @@ function CallInterface({ callId, onEndCall }) {
             }
             audioChunksRef.current = [];
         };
-
         recorderRef.current.stop();
     };
 
-    // Status visual
-    const getStatusColor = () => {
+    const getStatusLabel = () => {
         switch (status) {
-            case 'listening': return '#28a745'; // Green
-            case 'speaking': return '#ffc107'; // Yellow
-            case 'processing': return '#17a2b8'; // Blue
-            case 'ai_speaking': return '#dc3545'; // Red
-            default: return '#6c757d';
+            case 'listening': return 'Listening...';
+            case 'speaking': return 'User Speaking...';
+            case 'processing': return 'Thinking...';
+            case 'ai_speaking': return 'Agent Speaking...';
+            default: return 'Connecting...';
         }
     };
 
-    const getStatusText = () => {
-        switch (status) {
-            case 'listening': return 'Waiting for you...';
-            case 'speaking': return 'Listening to you...';
-            case 'processing': return 'Thinking...';
-            case 'ai_speaking': return 'AI Speaking...';
-            default: return 'Initializing...';
-        }
-    }
-
     return (
-        <div className="call-interface">
-            <div className="transcript">
-                <h2>Live Conversation</h2>
-                <p>{transcript}</p>
+        <div className="dashboard-container">
+            {/* Sidebar */}
+            <div className="sidebar">
+                <div className="agent-info">
+                    <div className="agent-avatar">🛒</div>
+                    <div className="agent-name">CartTalk Agent</div>
+                    <div className="agent-status">
+                        <div className="status-dot"></div> Online
+                    </div>
+                </div>
+
+                <div style={{ marginTop: 'auto' }}>
+                    <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '8px' }}>CALL ID</div>
+                    <div style={{ fontSize: '14px', fontFamily: 'monospace', color: '#64748b' }}>{callId.slice(0, 8)}...</div>
+                </div>
             </div>
 
-            <div className="status-indicator" style={{
-                textAlign: 'center', margin: '20px 0', padding: '10px',
-                backgroundColor: getStatusColor(), color: 'white', borderRadius: '5px',
-                fontWeight: 'bold', transition: 'background-color 0.3s'
-            }}>
-                {getStatusText()}
-            </div>
+            {/* Main Chat Area */}
+            <div className="main-content">
+                <div className="chat-area">
+                    {messages.length === 0 && (
+                        <div style={{ textAlign: 'center', color: '#94a3b8', marginTop: '100px' }}>
+                            <div style={{ fontSize: '48px', marginBottom: '16px' }}>👋</div>
+                            <p>Say "Hello" to start shopping!</p>
+                        </div>
+                    )}
 
-            <div className="controls">
-                <button onClick={onEndCall} className="btn-secondary">
-                    📞 End Call
-                </button>
-            </div>
+                    {messages.map((msg, i) => (
+                        <div key={i} className={`message ${msg.role}`}>
+                            <div className="bubble">
+                                {msg.text}
+                            </div>
+                        </div>
+                    ))}
 
-            <div style={{ marginTop: '20px', fontSize: '0.8em', color: '#666', textAlign: 'center' }}>
-                Hands-Free Mode Enabled. Speak naturally.
+                    {/* Thinking Indicator */}
+                    {status === 'processing' && (
+                        <div className="message ai">
+                            <div className="bubble" style={{ fontStyle: 'italic', color: '#94a3b8' }}>
+                                Thinking...
+                            </div>
+                        </div>
+                    )}
+                    <div ref={chatEndRef} />
+                </div>
+
+                {/* Bottom Controls */}
+                <div className="controls-area">
+                    <div className="status-badge" data-status={status}>
+                        <div className={`status-dot ${status === 'speaking' || status === 'ai_speaking' ? 'pulse-animation' : ''}`}></div>
+                        {getStatusLabel()}
+                    </div>
+
+                    <button className="btn-end" onClick={onEndCall}>
+                        End Call
+                    </button>
+                </div>
             </div>
         </div>
     );

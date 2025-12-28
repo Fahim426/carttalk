@@ -148,21 +148,27 @@ Inventory:
             if any('\u0D00' <= char <= '\u0D7F' for char in clean_text):
                 lang = 'ml'
 
+            # clean text for TTS
             print(f"Generating audio for: '{clean_text[:50]}...' in lang: {lang}")
             
             tts = gTTS(text=clean_text, lang=lang)
             fp = BytesIO()
             tts.write_to_fp(fp)
             fp.seek(0)
-            data = fp.read()
-            print(f"Audio generated, size: {len(data)} bytes")
-            return data
+            audio_bytes = fp.read()
+            print(f"Audio generated, size: {len(audio_bytes)} bytes")
+            
+            return {
+                "user_transcript": transcript,
+                "ai_text": clean_text,
+                "audio": audio_bytes
+            }
 
         except Exception as e:
             print(f"Gemini/Audio API Error: {e}")
             import traceback
             traceback.print_exc()
-            return b""
+            return None
 
 class InventoryService:
     def __init__(self):

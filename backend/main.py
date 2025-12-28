@@ -46,10 +46,19 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
             # Process with Gemini Live API
             # Context is refreshed per call or just once? Simple: just get it.
             context = inventory.get_context()
-            response = await gemini.process_audio(call_id, audio_data, context)
+            result = await gemini.process_audio(call_id, audio_data, context)
             
-            # Send back response audio (bytes from gTTS)
-            await websocket.send_bytes(response)
+            if result:
+                 # Send transcripts first
+                 if result.get("user_transcript"):
+                     await websocket.send_json({"type": "transcript", "role": "user", "text": result["user_transcript"]})
+                 
+                 if result.get("ai_text"):
+                     await websocket.send_json({"type": "transcript", "role": "ai", "text": result["ai_text"]})
+                 
+                 # Send audio
+                 if result.get("audio"):
+                    await websocket.send_bytes(result["audio"])
     except Exception as e:
         print(f"WebSocket Error: {e}")
         # await websocket.close() # Might already be closed
