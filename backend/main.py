@@ -1,15 +1,21 @@
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import asyncio
+import os
+import shutil
 from services import GeminiService, InventoryService, OrderService
 from db import init_db, get_products
-
 
 # Load environment variables
 load_dotenv()
 
 app = FastAPI()
+
+# Mount Static Files (Images)
+os.makedirs("static/images", exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # CORS
 app.add_middleware(
@@ -91,6 +97,35 @@ async def confirm_order(order_data: dict):
 async def get_orders_handler():
     """Get all orders"""
     return orders.get_all()
+
+@app.put("/api/orders/{order_id}/status")
+async def update_status(order_id: int, status_data: dict):
+    """Update order status (e.g. delivered)"""
+    new_status = status_data.get('status')
+    from db import update_order_status
+    return update_order_status(order_id, new_status)
+
+@app.post("/api/products")
+async def create_product(product: dict):
+    """Add new product"""
+    from db import add_product
+    return add_product(product)
+
+@app.put("/api/products/{product_id}")
+async def update_product_endpoint(product_id: int, data: dict):
+    """Update product (stock, price, image)"""
+    from db import update_product
+    return update_product(product_id, data)
+
+@app.post("/api/upload")
+async def upload_image(file: UploadFile = File(...)):
+    """Upload product image"""
+    file_location = f"static/images/{file.filename}"
+    with open(file_location, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    # Return full URL
+    return {"url": f"http://localhost:8000/{file_location}"}
 
 if __name__ == "__main__":
     import uvicorn

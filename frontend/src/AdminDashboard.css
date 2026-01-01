@@ -1,0 +1,111 @@
+.admin-container {
+    display: flex;
+    min-height: 100vh;
+    background: #f8fafc;
+    font-family: 'Inter', sans-serif;
+}
+
+.admin-sidebar {
+    width: 250px;
+    background: #1e293b;
+    color: white;
+    padding: 20px;
+}
+
+.admin-sidebar h2 {
+    margin-bottom: 40px;
+    font-size: 20px;
+}
+
+.menu-item {
+    padding: 12px;
+    margin-bottom: 5px;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: 0.2s;
+}
+
+.menu-item:hover,
+.menu-item.active {
+    background: #334155;
+    font-weight: 500;
+}
+
+.admin-content {
+    flex: 1;
+    padding: 40px;
+    overflow-y: auto;
+}
+
+.admin-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: white;
+    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.admin-table th,
+.admin-table td {
+    padding: 16px;
+    text-align: left;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+.admin-table th {
+    background: #f1f5f9;
+    font-weight: 600;
+    color: #475569;
+}
+
+.badge {
+    padding: 4px 10px;
+    border-radius: 50px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.badge.completed {
+    background: #dbface;
+    color: #166534;
+}
+
+.badge.Delivered {
+    background: #dbeafe;
+    color: #1e40af;
+}
+
+button {
+    padding: 6px 12px;
+    background: #3b82f6;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+/* Form Styles */
+.add-product-form {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 15px;
+    background: white;
+    padding: 20px;
+    margin-bottom: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgb(0 0 0 / 0.05);
+}
+
+.add-product-form input,
+.add-product-form select {
+    padding: 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+}
+
+.add-product-form button {
+    background: #10b981;
+    margin-top: 10px;
+}

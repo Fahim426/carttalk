@@ -30,16 +30,20 @@ Your top priority is to AUTO-DETECT the user's language and respond in the SAME 
 INSTRUCTIONS:
 1. Listen to the audio.
 2. EXTRACT what the user said into a line starting with "TRANSCRIPT: ".
-3. Thinking Process: Decide response based on inventory and user intent.
+3. Virtual Cart: Keep track of what the user wants to buy.
 4. GENERATE your response for the user into a line starting with "RESPONSE: ".
 5. If the user speaks English, reply in English.
 6. If the user speaks Malayalam, reply in Malayalam.
 7. Manage the shopping cart based on user requests (prices are in INR).
-8. Keep responses short (under 2 sentences).
-9. CHECKOUT PHASE: After the user confirms the order or asks for the bill, YOU MUST ASK for their NAME and DELIVERY ADDRESS.
-10. SAVING DATA: If the user provides Name and Address, output a separate line: "DATA: {'name': '...', 'address': '...'}".
-11. CONFIRMATION: Once you have Name and Address, output "COMMAND: CONFIRM_ORDER" to save it.
-12. CLOSING: After successful order confirmation, say a natural "Thank you" message in the user's language.
+8. CONSULTATIVE SELLING: If the user asks for a category (e.g., "protein", "snacks") or mentions a problem (e.g., "headache"), SUGGEST relevant items from the inventory based on their Category or general knowledge.
+9. Keep responses short (under 2 sentences).
+10. CHECKOUT PHASE: After the user confirms the order or asks for the bill, YOU MUST ASK for their NAME and DELIVERY ADDRESS.
+11. SAVING DATA: If the user provides Name and Address, output a separate line: "DATA: {\"name\": \"...\", \"address\": \"...\", \"cart\": [{\"id\": 123, \"qty\": 2, \"price\": 50}, ...]}". 
+    -- IMPORTANT: You MUST include the 'cart' items with their IDs and Quantities.
+    -- IMPORTANT: Use DOUBLE QUOTES for JSON keys and strings. Do not use single quotes in the JSON.
+12. CONFIRMATION: Once you have Name and Address and Cart, output "COMMAND: CONFIRM_ORDER" to save it.
+13. CLOSING: After successful order confirmation, say a natural "Thank you" message in the user's language.
+14. **AUDIO OUTPUT RULES**: Do NOT read out 'ID', 'JSON status' or technical details (like 'ID 12'). Speak NATURALLY.
 
 Inventory:
 """ + inventory_context
@@ -70,10 +74,6 @@ Inventory:
             print(f"Raw Gemini Response: {raw_text[:100]}...")
 
             # Parse Output
-            # Expecting:
-            # TRANSCRIPT: ...
-            # RESPONSE: ...
-            
             transcript = ""
             ai_response = raw_text
             extracted_data = None
@@ -82,34 +82,56 @@ Inventory:
             import re
             import json
             
+            # Improved Regex to handle nested JSON and newlines
             t_match = re.search(r'TRANSCRIPT:\s*(.*)', raw_text, re.IGNORECASE)
-            r_match = re.search(r'RESPONSE:\s*(.*?)(?:DATA:|COMMAND:|$)', raw_text, re.IGNORECASE | re.DOTALL)
-            d_match = re.search(r'DATA:\s*(\{.*?\})', raw_text, re.IGNORECASE)
+            # Capture DATA section: from DATA: until COMMAND: or End of String (DOTALL)
+            d_match = re.search(r'DATA:\s*(.*?)(?=\s*COMMAND:|\Z)', raw_text, re.DOTALL | re.IGNORECASE)
+            # Capture COMMAND:
             c_match = re.search(r'COMMAND:\s*(\w+)', raw_text, re.IGNORECASE)
+            # Response is everything else, or captured specifically
+            r_match = re.search(r'RESPONSE:\s*(.*?)(?=\s*DATA:|\s*COMMAND:|\Z)', raw_text, re.DOTALL | re.IGNORECASE)
             
             if t_match:
                 transcript = t_match.group(1).strip()
             
             if r_match:
                 ai_response = r_match.group(1).strip()
-            # If regex failed to capture response elegantly, default to raw text minus transcript
             if not ai_response and not t_match and not d_match and not c_match:
                 ai_response = raw_text
             elif not ai_response and t_match:
-                 # Fallback if RESPONSE: key missed
                  ai_response = raw_text.replace(t_match.group(0), '')
             
             if d_match:
+                json_str = d_match.group(1).strip()
+                # Remove potential markdown code blocks
+                json_str = json_str.replace('```json', '').replace('```', '').strip()
+                
                 try:
-                    json_str = d_match.group(1).replace("'", '"')
+                    # 1. Try direct load
                     extracted_data = json.loads(json_str)
+                except json.JSONDecodeError:
+                    try:
+                        # 2. Fix common AI JSON errors
+                        # Replace single quotes with double quotes
+                        # But be careful not to break apostrophes in text like "O'Neil" if they are inside double quotes already? 
+                        # Simple approach: if it looks like python dict str, use ast.literal_eval or replace ' with "
+                        import ast
+                        extracted_data = ast.literal_eval(json_str)
+                    except Exception:
+                         try:
+                            # 3. Last resort brute force fix
+                            json_str = json_str.replace("'", '"')
+                            # Fix booleans
+                            json_str = json_str.replace("True", "true").replace("False", "false").replace("None", "null")
+                            extracted_data = json.loads(json_str)
+                         except Exception as e:
+                            print(f"Final JSON Parse Error: {e} | Content: {json_str}")
+                
+                if extracted_data:
                     print(f"Extracted Data: {extracted_data}")
-                    
                     self.session_data = getattr(self, 'session_data', {})
                     if call_id not in self.session_data: self.session_data[call_id] = {}
                     self.session_data[call_id].update(extracted_data)
-                except Exception as e:
-                    print(f"JSON Parse Error: {e}")
 
             if c_match:
                 command = c_match.group(1).strip()
@@ -122,9 +144,10 @@ Inventory:
                         'phone': 'VoiceUser',
                         'name': session.get('name', 'Unknown'),
                         'address': session.get('address', 'Unknown'),
-                        'total': 0.0, # Placeholder
+                        'total': 0.0,
                         'language': 'en', 
-                        'transcript': history_text
+                        'transcript': history_text,
+                        'items': session.get('cart', [])
                     }
                     create_order(order_payload)
                     print("Order Saved to DB")
@@ -142,6 +165,19 @@ Inventory:
             clean_text = re.sub(r'\*+', '', ai_response)
             clean_text = re.sub(r'[#`]', '', clean_text)
             clean_text = clean_text.replace('RESPONSE:', '').strip()
+            
+            # AGGRESSIVE CLEANUP: Remove DATA and COMMAND blocks from spoken text
+            clean_text = re.sub(r'DATA:\s*\{.*?\}', '', clean_text, flags=re.DOTALL | re.IGNORECASE)
+            clean_text = re.sub(r'COMMAND:\s*\w+', '', clean_text, flags=re.IGNORECASE)
+            
+            # Remove any residual TRANSCRIPT lines if they leaked
+            clean_text = re.sub(r'TRANSCRIPT:.*', '', clean_text, flags=re.IGNORECASE)
+
+            # NEW: Remove ID references like (ID: 12) or [ID: 12] spoken by mistake
+            clean_text = re.sub(r'[\[\(]ID:?\s*\d+[\]\)]', '', clean_text, flags=re.IGNORECASE)
+            clean_text = re.sub(r'ID\s*\d+', '', clean_text, flags=re.IGNORECASE)
+            
+            clean_text = clean_text.strip()
             
             # Detect language
             lang = 'en'
@@ -178,7 +214,8 @@ class InventoryService:
     def get_context(self):
         """Return inventory context for Gemini"""
         products = get_products()
-        return "\n".join([f"{p['name_en']}/{p['name_ml']}: ₹{p['price']}, Stock: {p['stock']}" for p in products])
+        # Include ID and Category for AI to track and recommend
+        return "\n".join([f"[ID: {p['id']}] {p['name_en']}/{p['name_ml']} ({p.get('category','General')}): ₹{p['price']}, Stock: {p['stock']}" for p in products])
     
     def list_all(self):
         return get_products()
