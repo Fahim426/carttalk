@@ -1,17 +1,32 @@
-from fastapi import FastAPI, WebSocket, UploadFile, File
+"""
+main.py
+FastAPI entry point for CartTalk.
+Provides REST APIs for frontend interaction (inventory, auth, orders)
+and a WebSocket endpoint for real-time AI voice streaming.
+"""
+import shutil
+import json
+import uuid
+import os
+from fastapi import FastAPI, UploadFile, File, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
-import asyncio
-import os
-import shutil
 from services import GeminiService, InventoryService, OrderService
-from db import init_db, get_products
+from db import (
+    init_db, get_products, get_user, get_cart, update_user,
+    get_orders_by_user, update_order_status, add_product,
+    update_product, delete_product, delete_order, save_cart
+)
 
 # Load environment variables
 load_dotenv()
 
-app = FastAPI()
+app = FastAPI(
+    title="CartTalk API",
+    description="AI-powered voice grocery assistant backend",
+    version="1.0.0"
+)
 
 # Mount Static Files (Images)
 os.makedirs("static/images", exist_ok=True)
@@ -32,61 +47,117 @@ inventory = InventoryService()
 gemini = GeminiService()
 orders = OrderService()
 
-import uuid
+# Store active calls -> user mapping
+call_sessions = {}
+
+# ─── Health Check ────────────────────────────────────────────
+
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint for monitoring"""
+    return {"status": "healthy", "service": "CartTalk API", "version": "1.0.0"}
+
+# ─── Authentication ──────────────────────────────────────────
+
+@app.post("/api/auth/login")
+async def customer_login(data: dict):
+    """Simple Phone Login — auto-creates user if not exists"""
+    phone = data.get('phone')
+    if not phone:
+        return {"error": "Phone required"}
+    
+    user = update_user(phone) 
+    cart = get_cart(phone)
+    return {"user": user, "cart": cart}
+
+# ─── Voice Call ──────────────────────────────────────────────
 
 @app.post("/api/call/start")
-async def start_call():
-    """Start new customer call"""
-    return {"call_id": str(uuid.uuid4()), "status": "ready"}
+async def start_call(data: dict = None):
+    """Start new customer call session"""
+    call_id = str(uuid.uuid4())
+    
+    user_id = data.get('user_id') if data else None
+    if user_id:
+        call_sessions[call_id] = user_id
+        
+    return {"call_id": call_id, "status": "ready"}
 
 @app.websocket("/api/call/{call_id}/stream")
 async def websocket_endpoint(websocket: WebSocket, call_id: str):
-    """Real-time audio streaming"""
+    """Real-time audio streaming via WebSocket"""
     await websocket.accept()
     try:
         while True:
-            # Receive audio chunk from frontend
-            # Since frontend start() has no timeslice, this is likely the whole utterance upon stop()
             audio_data = await websocket.receive_bytes()
             
-            # Process with Gemini Live API
-            # Context is refreshed per call or just once? Simple: just get it.
-            context = inventory.get_context()
-            result = await gemini.process_audio(call_id, audio_data, context)
+            # Context Preparation
+            base_context = inventory.get_context()
+            
+            # Personalization
+            user_context = ""
+            user_phone = call_sessions.get(call_id)
+            if user_phone:
+                u = get_user(user_phone)
+                c = get_cart(user_phone)
+                if u:
+                    user_context += f"User Name: {u['name'] or 'Guest'}\nUser Address: {u['address'] or 'Unknown'}\n"
+                if c:
+                    cart_summary = ", ".join([f"{item['qty']}x {item['name']}" for item in c])
+                    user_context += f"Previous Cart: {cart_summary}\n"
+            
+            final_context = (user_context + "\n" + base_context) if user_context else base_context
+            
+            result = await gemini.process_audio(call_id, audio_data, final_context, user_id=user_phone)
             
             if result:
-                 # Send transcripts first
-                 if result.get("user_transcript"):
-                     await websocket.send_json({"type": "transcript", "role": "user", "text": result["user_transcript"]})
-                 
-                 if result.get("ai_text"):
-                     await websocket.send_json({"type": "transcript", "role": "ai", "text": result["ai_text"]})
-                 
-                 # Send audio
-                 if result.get("audio"):
+                # Send transcripts first
+                if result.get("user_transcript"):
+                    await websocket.send_json({"type": "transcript", "role": "user", "text": result["user_transcript"]})
+                
+                if result.get("ai_text"):
+                    await websocket.send_json({"type": "transcript", "role": "ai", "text": result["ai_text"]})
+                
+                # Send cart updates
+                if result.get("cart") is not None:
+                    await websocket.send_json({"type": "cart", "cart": result["cart"]})
+
+                # Send audio
+                if result.get("audio"):
                     await websocket.send_bytes(result["audio"])
+                
+                # Check for termination signal
+                if result.get("terminate"):
+                    await websocket.send_text(json.dumps({"type": "control", "action": "terminate"}))
+            else:
+                # Error Case: Unblock Frontend
+                await websocket.send_json({"type": "error", "text": "Sorry, I encountered an error. Please try again."})
     except Exception as e:
         print(f"WebSocket Error: {e}")
-        # await websocket.close() # Might already be closed
+
+# ─── Products ────────────────────────────────────────────────
 
 @app.get("/api/products")
 async def get_all_products():
     """Get all products"""
     return inventory.list_all()
 
-@app.post("/api/cart/add")
-async def add_to_cart(item: dict):
-    # This endpoint was mentioned in requirement "POST /api/cart/add"
-    # But not implemented in prompt's main.py sample
-    # We will implement a dummy or simple logic if needed
-    # But usually, the Voice Assistant manages the cart in context strings or DB?
-    # The prompt sample says "Add items to cart as customer requests" in SYSTEM PROMPT.
-    # So the "Cart" might be purely maintained by the LLM context or we should maintain a session cart.
-    # Given the simplicity, and the fact that the frontend doesn't show a cart (only transcript),
-    # maybe this endpoint isn't used by the frontend provided?
-    # The PROMPT required it: "POST /api/cart/add".
-    # I'll add a dummy endpoint.
-    return {"status": "added", "item": item}
+@app.post("/api/products")
+async def create_product(product: dict):
+    """Add new product"""
+    return add_product(product)
+
+@app.put("/api/products/{product_id}")
+async def update_product_endpoint(product_id: int, data: dict):
+    """Update product (stock, price, image)"""
+    return update_product(product_id, data)
+
+@app.delete("/api/products/{product_id}")
+async def delete_product_endpoint(product_id: int):
+    """Delete a product"""
+    return delete_product(product_id)
+
+# ─── Orders ──────────────────────────────────────────────────
 
 @app.post("/api/order/confirm")
 async def confirm_order(order_data: dict):
@@ -95,27 +166,38 @@ async def confirm_order(order_data: dict):
 
 @app.get("/api/orders")
 async def get_orders_handler():
-    """Get all orders"""
+    """Get all orders (merchant dashboard)"""
     return orders.get_all()
+
+@app.get("/api/orders/user")
+async def get_user_orders(phone: str):
+    """Get orders for a specific customer"""
+    return get_orders_by_user(phone)
 
 @app.put("/api/orders/{order_id}/status")
 async def update_status(order_id: int, status_data: dict):
     """Update order status (e.g. delivered)"""
     new_status = status_data.get('status')
-    from db import update_order_status
     return update_order_status(order_id, new_status)
 
-@app.post("/api/products")
-async def create_product(product: dict):
-    """Add new product"""
-    from db import add_product
-    return add_product(product)
+@app.delete("/api/orders/{order_id}")
+async def delete_order_endpoint(order_id: int):
+    """Delete order"""
+    return delete_order(order_id)
 
-@app.put("/api/products/{product_id}")
-async def update_product_endpoint(product_id: int, data: dict):
-    """Update product (stock, price, image)"""
-    from db import update_product
-    return update_product(product_id, data)
+# ─── Cart ────────────────────────────────────────────────────
+
+@app.post("/api/cart/add")
+async def add_to_cart(data: dict):
+    """Add item to user's persistent cart"""
+    phone = data.get('phone')
+    items = data.get('items', [])
+    if not phone:
+        return {"error": "Phone required"}
+    save_cart(phone, items)
+    return {"status": "updated", "items_count": len(items)}
+
+# ─── Uploads ─────────────────────────────────────────────────
 
 @app.post("/api/upload")
 async def upload_image(file: UploadFile = File(...)):
@@ -123,9 +205,9 @@ async def upload_image(file: UploadFile = File(...)):
     file_location = f"static/images/{file.filename}"
     with open(file_location, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-    
-    # Return full URL
     return {"url": f"http://localhost:8000/{file_location}"}
+
+# ─── Entry Point ─────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn

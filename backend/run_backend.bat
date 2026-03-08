@@ -1,7 +1,5 @@
 @echo off
-echo Setting up localized environment...
-set PYTHONDONTWRITEBYTECODE=1
-set PYTHONPATH=%~dp0libs;%PYTHONPATH%
 echo Starting CartTalk Backend...
+set PYTHONDONTWRITEBYTECODE=1
 python main.py
 pause

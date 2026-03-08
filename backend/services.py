@@ -1,6 +1,21 @@
+"""
+services.py
+Core AI integration module for CartTalk.
+Handles the interaction with Google Gemini 2.5 Flash, including
+parsing user intent, maintaining sliding window context,
+managing shopping cart state, and generating Neural TTS audio.
+"""
 import os
+from datetime import datetime
 from google import genai
 from db import get_products, create_order, get_orders
+try:
+    import edge_tts
+    USE_EDGE_TTS = True
+    print("Using edge-tts (Neural voices)")
+except ImportError:
+    USE_EDGE_TTS = False
+    print("edge-tts not found, falling back to gTTS")
 from gtts import gTTS
 from io import BytesIO
 
@@ -12,53 +27,119 @@ class GeminiService:
              print("Warning: GEMINI_API_KEY not found in environment variables.")
         self.client = genai.Client(api_key=api_key)
         self.histories = {} # To store conversation history for each call_id
+        self.summaries = {} # Store summarized older context per call_id
     
-    async def process_audio(self, call_id, audio_data, inventory_context):
+    async def process_audio(self, call_id, audio_data, inventory_context, user_id=None):
         """Send audio to Gemini Live API, get response and convert to audio"""
         try:
             # Initialize history for this call if not exists
             if call_id not in self.histories:
                 self.histories[call_id] = []
             
-            # Construct current turn history
-            
             # System Instruction (always first)
-            system_instruction = """
-You are CartTalk, a bilingual grocery assistant (English and Malayalam). 
-Your top priority is to AUTO-DETECT the user's language and respond in the SAME language.
+            now = datetime.now()
+            time_context = now.strftime("%I:%M %p")
 
-INSTRUCTIONS:
-1. Listen to the audio.
-2. EXTRACT what the user said into a line starting with "TRANSCRIPT: ".
-3. Virtual Cart: Keep track of what the user wants to buy.
-4. GENERATE your response for the user into a line starting with "RESPONSE: ".
-5. If the user speaks English, reply in English.
-6. If the user speaks Malayalam, reply in Malayalam.
-7. Manage the shopping cart based on user requests (prices are in INR).
-8. CONSULTATIVE SELLING: If the user asks for a category (e.g., "protein", "snacks") or mentions a problem (e.g., "headache"), SUGGEST relevant items from the inventory based on their Category or general knowledge.
-9. Keep responses short (under 2 sentences).
-10. CHECKOUT PHASE: After the user confirms the order or asks for the bill, YOU MUST ASK for their NAME and DELIVERY ADDRESS.
-11. SAVING DATA: If the user provides Name and Address, output a separate line: "DATA: {\"name\": \"...\", \"address\": \"...\", \"cart\": [{\"id\": 123, \"qty\": 2, \"price\": 50}, ...]}". 
-    -- IMPORTANT: You MUST include the 'cart' items with their IDs and Quantities.
-    -- IMPORTANT: Use DOUBLE QUOTES for JSON keys and strings. Do not use single quotes in the JSON.
-12. CONFIRMATION: Once you have Name and Address and Cart, output "COMMAND: CONFIRM_ORDER" to save it.
-13. CLOSING: After successful order confirmation, say a natural "Thank you" message in the user's language.
-14. **AUDIO OUTPUT RULES**: Do NOT read out 'ID', 'JSON status' or technical details (like 'ID 12'). Speak NATURALLY.
+            system_instruction = f"""
+You are CartTalk, a strict bilingual grocery assistant (English and Malayalam). 
+Current Store Time: {time_context}
+Your Goal: Act like a helpful but CONCISE Shopkeeper ("Kada Chettan").
+
+CRITICAL INSTRUCTIONS:
+1. LANGUAGE DETECTION:
+   - If User speaks MALAYALAM -> PROCEED IN MALAYALAM ONLY. DO NOT output ANY English in the RESPONSE section.
+   - If User speaks ENGLISH -> Proceed in English.
+   - Exception: Your very first greeting must use "Welcome to CartTalk!".
+
+2. MALAYALAM PERSONA (If User speaks Malayalam):
+   - Greeting: ONLY say "നമസ്കാരം" (Namaskaram) or "ഹലോ" (Hello) in the VERY FIRST interaction. Do NOT repeat greetings throughout the rest of the conversation. NOT "Vanakkam".
+   - Vocabulary: Use simple, everyday Malayalam words for common items (e.g., "Thakkali", "Ari", "Parippu"). DO NOT use overly formal words like "പലവ്യഞ്ജനങ്ങൾ".
+   - Structure: Be extremely brief. Do not list categories. Just ask what they need.
+   - Confirmation: "ഇതു എടുക്കട്ടെ?"
+   - Price: "ഒരു കിലോയ്ക്ക് 35 രൂപയാണ്"
+   - Example: 
+     - User: "Oru kilo thakkali"
+     - Bot (RESPONSE): "തക്കാളി ഉണ്ട്. കിലോയ്ക്ക് 35 രൂപയാണ്. ഒരു കിലോ എടുക്കട്ടെ?"
+
+3. REQUIRED OUTPUT STRUCTURE (You MUST output EXACTLY these 4 sections in this EXACT order. Do NOT mix or merge them):
+TRANSCRIPT: [Exact letters spoken by User in the original language. NO TRANSLATIONS].
+DATA: ```json
+{{"cart": [...]}}
+``` or just ```json
+{{}}
+``` if no changes.
+COMMAND: UPDATE_CART or CONFIRM_ORDER or NONE
+RESPONSE: [Your actual spoken reply to the user. MUST be Malayalam ONLY if they spoke Malayalam. This section MUST NOT contain any JSON, code, or technical data. Only natural conversational text.]
+
+5. ADVANCED INTELLIGENCE:
+   - SLOT FILLING: If they ask a category (e.g., "Ari"), ask which type: "ഏത് അരിയാണ് വേണ്ടത്? മട്ടയും ബസ്മതിയും ഉണ്ട്."
+   - DO NOT LIST INVENTORY: If they ask "What do you have?", say "അരി, പച്ചക്കറികൾ ഒക്കെ ഉണ്ട്. എന്താണ് വേണ്ടത്?" (Rice, vegetables, etc. What do you need?) Be short. Do NOT use the word പലവ്യഞ്ജനങ്ങൾ.
+   - RECIPE CHEF MODE: If the User asks how to make a dish (e.g., "How to make Chicken Curry?", "Chicken Biriyani Recipe"), briefly explain the recipe, list the ingredients needed, and proactively ask if they want you to add those specific ingredients to their cart from the store inventory.
+   - MONTHLY REMINDER: Before confirming the order, check USER ESSENTIALS and FORGOTTEN ITEMS lists. If any essential item is NOT in the current cart, you MUST proactively and naturally say something like: "I noticed you usually buy [item]. Would you like to add that too?" or "Last time you ordered [item] — should I add it?". Do this conversationally, not as a list dump.
+   - LOW STOCK WARNING: If any LOW STOCK ALERT items are listed, mention it early: "Just a heads up, [item] is running low in stock. Want to grab some before it's out?"
+   - IDENTITY CHECK: If the User Name is "Guest" or User Address is "Unknown", YOU MUST ASK for their Name and Address before finishing the order. When asking for the address, explicitly ask for their Street Name and Pincode (e.g., "പിൻകോഡും സ്ഥലവും കൂടി പറയാമോ?").
+   - FINALIZING: ONLY output COMMAND: CONFIRM_ORDER when the user explicitly agrees to finalize the purchase AND you have their Name and Address.
+
+5. JSON DATA PAYLOAD `DATA:`
+   - Track items in `cart` list.
+   - If User provides their Name or Address, update `name` and `address` fields in the JSON.
 
 Inventory:
 """ + inventory_context
+            
+            # Fetch User History for personalization
+            if user_id:
+                from db import get_user_frequent_items, get_user_monthly_essentials, get_forgotten_items
+                
+                # Frequent Items
+                freq_items = get_user_frequent_items(user_id)
+                if freq_items:
+                    items_str = ", ".join([f"{i['name']} (Qty: {i['qty']})" for i in freq_items])
+                    system_instruction += f"\n\nUSER HISTORY (Frequent Items): [{items_str}]"            
 
+                # Monthly Essentials
+                monthly_essentials = get_user_monthly_essentials(user_id)
+                if monthly_essentials:
+                     essentials_str = ", ".join([i['name'] for i in monthly_essentials])
+                     system_instruction += f"\n\nUSER ESSENTIALS (Monthly Habits): [{essentials_str}]"
+                
+                # Forgotten Items (ordered ≥3 times but not in last 30 days)
+                forgotten = get_forgotten_items(user_id)
+                if forgotten:
+                    forgot_str = ", ".join([f"{i['name']} (ordered {i['times_ordered']}x before)" for i in forgotten])
+                    system_instruction += f"\n\nFORGOTTEN ITEMS (User hasn't ordered these recently): [{forgot_str}]"
+                
+                # Low Stock Alerts for user's frequent items
+                if freq_items:
+                    from db import get_products
+                    all_products = get_products()
+                    low_stock_alerts = []
+                    for fi in freq_items:
+                        for p in all_products:
+                            if p['id'] == fi['id'] and p['stock'] <= p.get('safety_stock', 5) and p['stock'] > 0:
+                                low_stock_alerts.append(f"{p['name_en']} (only {p['stock']} left)")
+                    if low_stock_alerts:
+                        system_instruction += f"\n\nLOW STOCK ALERT (User's favorites running low): [{', '.join(low_stock_alerts)}]"
+                     
             # specific instruction for the first turn
             if not self.histories[call_id]:
-                 system_instruction += "\n\nSPECIAL INSTRUCTION: This is the first interaction. You MUST greet the user with 'Welcome to CartTalk! How can I help you?' (or its Malayalam equivalent if the user speaks Malayalam)."
+                if user_id:
+                     system_instruction += f"\n\nSPECIAL INSTRUCTION: This is the FIRST interaction. You MUST start your response exactly with 'Welcome back to CartTalk!'. After this greeting, continue in the user's detected language."
+                else:
+                     system_instruction += "\n\nSPECIAL INSTRUCTION: This is the FIRST interaction. You MUST start your response exactly with 'Welcome to CartTalk!'. After this exact greeting, ask how you can help based on the user's detected language (English or Malayalam)."
 
-            history_text = "\n".join(self.histories[call_id])
+            # Build history with summarization for long conversations
+            summary_prefix = ""
+            if call_id in self.summaries and self.summaries[call_id]:
+                summary_prefix = f"CONVERSATION SUMMARY (older turns):\n{self.summaries[call_id]}\n\n"
+            
+            history_text = summary_prefix + "RECENT CONVERSATION:\n" + "\n".join(self.histories[call_id])
             
             final_prompt = system_instruction + "\n\nCONVERSATION HISTORY:\n" + history_text + "\n\nCURRENT AUDIO INPUT:"
             
             # Request
             response = self.client.models.generate_content(
-                model="gemini-2.0-flash-exp",
+                model="gemini-2.5-flash",
                 contents=[
                     {"role": "user", "parts": [
                         {"text": final_prompt},
@@ -94,12 +175,12 @@ Inventory:
             if t_match:
                 transcript = t_match.group(1).strip()
             
-            if r_match:
-                ai_response = r_match.group(1).strip()
-            if not ai_response and not t_match and not d_match and not c_match:
-                ai_response = raw_text
-            elif not ai_response and t_match:
-                 ai_response = raw_text.replace(t_match.group(0), '')
+            # Robust Extraction of AI Response (Removing all backend tags)
+            ai_response = raw_text
+            ai_response = re.sub(r'TRANSCRIPT:\s*(.*?)(?=\s*DATA:|\s*COMMAND:|\s*RESPONSE:|\Z)', '', ai_response, flags=re.DOTALL | re.IGNORECASE)
+            ai_response = re.sub(r'DATA:\s*(.*?)(?=\s*COMMAND:|\s*RESPONSE:|\Z)', '', ai_response, flags=re.DOTALL | re.IGNORECASE)
+            ai_response = re.sub(r'COMMAND:\s*(.*?)(?=\s*RESPONSE:|\Z)', '', ai_response, flags=re.IGNORECASE)
+            ai_response = re.sub(r'RESPONSE:\s*', '', ai_response, flags=re.IGNORECASE).strip()
             
             if d_match:
                 json_str = d_match.group(1).strip()
@@ -135,75 +216,202 @@ Inventory:
 
             if c_match:
                 command = c_match.group(1).strip()
+                
+                if command == 'UPDATE_CART' and user_id:
+                     from db import save_cart
+                     print("Saving Persistent Cart...")
+                     session = getattr(self, 'session_data', {}).get(call_id, {})
+                     cart_items = session.get('cart', [])
+                     if cart_items:
+                         valid_pids = {p['id'] for p in get_products()}
+                         valid_cart = [item for item in cart_items if item.get('id') in valid_pids]
+                         if len(valid_cart) < len(cart_items):
+                             print("Warning: AI hallucinated product IDs removed")
+                         print(f"Update DB Cart: {len(valid_cart)} items for {user_id}")
+                         save_cart(user_id, valid_cart)
+
                 if command == 'CONFIRM_ORDER':
                     # Save to DB
                     print("Executing Order Confirmation...")
                     session = getattr(self, 'session_data', {}).get(call_id, {})
                     
+                    found_name = session.get('name', 'Unknown')
+                    found_address = session.get('address', 'Unknown')
+                    
+                    if user_id:
+                        from db import update_user, get_user
+                        # Only overwrite if they actually gave a new one, else keep DB
+                        db_user = get_user(user_id)
+                        final_name = found_name if found_name != 'Unknown' else (db_user['name'] if db_user else 'Unknown')
+                        final_address = found_address if found_address != 'Unknown' else (db_user['address'] if db_user else 'Unknown')
+                        update_user(user_id, final_name, final_address)
+                    else:
+                        final_name = found_name
+                        final_address = found_address
+                        
+                    # Filter invalid IDs out and calculate actual total
+                    cart_items = session.get('cart', [])
+                    valid_pids = {p['id'] for p in get_products()}
+                    valid_cart = [item for item in cart_items if item.get('id') in valid_pids]
+                    
+                    order_total = 0.0
+                    for item in valid_cart:
+                        item_price = float(item.get('price', 0))
+                        item_qty = float(item.get('quantity', item.get('qty', 1)))
+                        order_total += item_price * item_qty
+                    
                     order_payload = {
-                        'phone': 'VoiceUser',
-                        'name': session.get('name', 'Unknown'),
-                        'address': session.get('address', 'Unknown'),
-                        'total': 0.0,
+                        'phone': user_id if user_id else 'VoiceUser',
+                        'name': final_name,
+                        'address': final_address,
+                        'total': round(order_total, 2),
                         'language': 'en', 
                         'transcript': history_text,
-                        'items': session.get('cart', [])
+                        'items': valid_cart
                     }
                     create_order(order_payload)
-                    print("Order Saved to DB")
+                    print(f"Order Saved to DB | Total: Rs.{order_total}")
 
             # Update History
             if transcript:
                 self.histories[call_id].append(f"User: {transcript}")
             self.histories[call_id].append(f"Model: {ai_response}")
             
-            # Keep history manageable (last 10 turns)
-            if len(self.histories[call_id]) > 20:
-                self.histories[call_id] = self.histories[call_id][-20:]
+            # Keep history manageable with sliding window + summarization
+            MAX_RECENT = 20  # Keep last 10 turns (20 entries) in full detail
+            if len(self.histories[call_id]) > MAX_RECENT + 10:
+                # Summarize the oldest entries before trimming
+                old_entries = self.histories[call_id][:-MAX_RECENT]
+                old_text = "\n".join(old_entries)
+                
+                try:
+                    summary_resp = self.client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=[{"role": "user", "parts": [{"text": f"Summarize this conversation in 2-3 sentences, focusing on: items discussed, items added to cart, customer preferences, name/address if mentioned. Be concise:\n\n{old_text}"}]}]
+                    )
+                    new_summary = summary_resp.text.strip()
+                    # Append to existing summary
+                    existing = self.summaries.get(call_id, '')
+                    self.summaries[call_id] = (existing + "\n" + new_summary).strip()
+                    print(f"Context summarized: {new_summary[:80]}...")
+                except Exception as e:
+                    print(f"Summarization failed: {e}")
+                
+                # Keep only recent entries
+                self.histories[call_id] = self.histories[call_id][-MAX_RECENT:]
 
             # Clean text for TTS
-            clean_text = re.sub(r'\*+', '', ai_response)
+            clean_text = ai_response
+            
+            # Ultra-Aggressive sweeping to ensure NO JSON or tags leak to users
+            clean_text = re.sub(r'DATA:\s*\{.*?\}\s*', '', clean_text, flags=re.DOTALL | re.IGNORECASE)
+            clean_text = re.sub(r'DATA:.*?$', '', clean_text, flags=re.DOTALL | re.IGNORECASE)
+            clean_text = re.sub(r'COMMAND:\s*[A-Z_]+', '', clean_text, flags=re.IGNORECASE)
+            clean_text = re.sub(r'\{"cart":.*?\}', '', clean_text, flags=re.DOTALL | re.IGNORECASE)
+
+            # Standard cleanup
+            clean_text = re.sub(r'\*+', '', clean_text)
             clean_text = re.sub(r'[#`]', '', clean_text)
             clean_text = clean_text.replace('RESPONSE:', '').strip()
             
-            # AGGRESSIVE CLEANUP: Remove DATA and COMMAND blocks from spoken text
-            clean_text = re.sub(r'DATA:\s*\{.*?\}', '', clean_text, flags=re.DOTALL | re.IGNORECASE)
-            clean_text = re.sub(r'COMMAND:\s*\w+', '', clean_text, flags=re.IGNORECASE)
+            # Clean parenthetical translations e.g., (Hello)
+            clean_text = re.sub(r'\(.*?\)', '', clean_text)
             
-            # Remove any residual TRANSCRIPT lines if they leaked
-            clean_text = re.sub(r'TRANSCRIPT:.*', '', clean_text, flags=re.IGNORECASE)
-
             # NEW: Remove ID references like (ID: 12) or [ID: 12] spoken by mistake
             clean_text = re.sub(r'[\[\(]ID:?\s*\d+[\]\)]', '', clean_text, flags=re.IGNORECASE)
             clean_text = re.sub(r'ID\s*\d+', '', clean_text, flags=re.IGNORECASE)
+
+            # Final safety cleanup for leaking JSON brackets
+            # Remove trailing "]}" or "}" or "]" if they are at the end of the line
+            clean_text = re.sub(r'[\]\}]+\s*$', '', clean_text).strip()
             
             clean_text = clean_text.strip()
             
-            # Detect language
-            lang = 'en'
-            if any('\u0D00' <= char <= '\u0D7F' for char in clean_text):
-                lang = 'ml'
+            # Fallback if no text to speak (e.g. only Command was output)
+            if not clean_text:
+                if command == 'CONFIRM_ORDER':
+                    clean_text = "Order confirmed! Thank you."
+                else:
+                    clean_text = "Okay."
 
-            # clean text for TTS
+            # Detect language (ratio-based: use Malayalam voice only if majority is Malayalam)
+            lang = 'en'
+            ml_chars = sum(1 for c in clean_text if '\u0D00' <= c <= '\u0D7F')
+            latin_chars = sum(1 for c in clean_text if c.isalpha() and ord(c) < 128)
+            total_alpha = ml_chars + latin_chars
+            if total_alpha > 0 and (ml_chars / total_alpha) > 0.4:
+                lang = 'ml'
+            
+            # Generate TTS Audio
             print(f"Generating audio for: '{clean_text[:50]}...' in lang: {lang}")
             
-            tts = gTTS(text=clean_text, lang=lang)
-            fp = BytesIO()
-            tts.write_to_fp(fp)
-            fp.seek(0)
-            audio_bytes = fp.read()
-            print(f"Audio generated, size: {len(audio_bytes)} bytes")
+            audio_bytes = None
+            
+            # Try edge-tts first (faster, better quality neural voices)
+            if USE_EDGE_TTS:
+                try:
+                    voice = 'ml-IN-SobhanaNeural' if lang == 'ml' else 'en-US-AriaNeural'
+                    communicate = edge_tts.Communicate(clean_text, voice)
+                    fp = BytesIO()
+                    async for chunk in communicate.stream():
+                        if chunk["type"] == "audio":
+                            fp.write(chunk["data"])
+                    fp.seek(0)
+                    audio_bytes = fp.read()
+                    if len(audio_bytes) > 0:
+                        print(f"Edge-TTS audio generated, size: {len(audio_bytes)} bytes")
+                    else:
+                        raise Exception("Edge-TTS returned empty audio")
+                except Exception as e:
+                    print(f"Edge-TTS failed: {e}, falling back to gTTS")
+                    audio_bytes = None
+            
+            # Fallback to gTTS
+            if audio_bytes is None:
+                tts = gTTS(text=clean_text, lang=lang)
+                fp = BytesIO()
+                tts.write_to_fp(fp)
+                fp.seek(0)
+                audio_bytes = fp.read()
+                print(f"gTTS audio generated, size: {len(audio_bytes)} bytes")
             
             return {
                 "user_transcript": transcript,
                 "ai_text": clean_text,
-                "audio": audio_bytes
+                "audio": audio_bytes,
+                "terminate": (command == 'CONFIRM_ORDER'),
+                "cart": getattr(self, 'session_data', {}).get(call_id, {}).get('cart', [])
             }
 
         except Exception as e:
             print(f"Gemini/Audio API Error: {e}")
             import traceback
             traceback.print_exc()
+            with open("error_log.txt", "a") as f:
+                f.write(f"Timestamp: {datetime.now()}\n")
+                f.write(f"Error: {e}\n")
+                traceback.print_exc(file=f)
+                f.write("\n" + "-"*20 + "\n")
+
+            # Handle Rate Limit gracefully 
+            error_msg = str(e)
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                error_text = "Sorry, I am currently receiving too many requests. Please try again in about a minute."
+                try:
+                    tts = gTTS(text=error_text, lang='en')
+                    fp = BytesIO()
+                    tts.write_to_fp(fp)
+                    fp.seek(0)
+                    audio_bytes = fp.read()
+                    return {
+                        "user_transcript": "[Quota Exceeded]",
+                        "ai_text": error_text,
+                        "audio": audio_bytes,
+                        "terminate": False
+                    }
+                except Exception as tts_e:
+                    print(f"TTS fallback failed: {tts_e}")
+
             return None
 
 class InventoryService:
@@ -214,8 +422,32 @@ class InventoryService:
     def get_context(self):
         """Return inventory context for Gemini"""
         products = get_products()
-        # Include ID and Category for AI to track and recommend
-        return "\n".join([f"[ID: {p['id']}] {p['name_en']}/{p['name_ml']} ({p.get('category','General')}): ₹{p['price']}, Stock: {p['stock']}" for p in products])
+        
+        # Group by Category for better AI context
+        grouped = {}
+        for p in products:
+            cat = p.get('category', 'General')
+            if cat not in grouped: grouped[cat] = []
+            
+            # Safety Stock Logic
+            buffer_val = p.get('safety_stock', 5)
+            safe_stock = max(0, p['stock'] - buffer_val)
+            
+            grouped[cat].append({
+                'id': p['id'],
+                'name': f"{p['name_en']}/{p['name_ml']}",
+                'price': p['price'],
+                'stock': safe_stock
+            })
+            
+        context_lines = []
+        for cat, items in grouped.items():
+            context_lines.append(f"Category: {cat}")
+            for item in items:
+                status = f"Stock: {item['stock']}" if item['stock'] > 0 else "OUT OF STOCK"
+                context_lines.append(f"  - [ID: {item['id']}] {item['name']} @ ₹{item['price']} ({status})")
+            
+        return "\n".join(context_lines)
     
     def list_all(self):
         return get_products()

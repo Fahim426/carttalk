@@ -3,32 +3,90 @@ import CallInterface from './CallInterface';
 import AdminDashboard from './AdminDashboard';
 import AdminLogin from './AdminLogin';
 import ProductGrid from './ProductGrid';
+import OrderHistory from './OrderHistory';
 import './App.css';
 
 function App() {
+    // AOS Removed for performance
+
     const [isCallActive, setIsCallActive] = useState(false);
     const [callId, setCallId] = useState(null);
-    const [viewMode, setViewMode] = useState('home'); // home | login | admin
+    const [viewMode, setViewMode] = useState('home'); // home | login | admin | history
+    const [user, setUser] = useState(null);
+    const [searchQuery, setSearchQuery] = useState('');
 
     const startCall = async () => {
-        const res = await fetch('http://localhost:8000/api/call/start', { method: 'POST' });
-        const data = await res.json();
-        setCallId(data.call_id);
-        setIsCallActive(true);
+        let currentUser = user;
+
+        // Identity Verification: Enforce Login before call
+        if (!currentUser) {
+            const phone = prompt("To ensure we save your order history, please enter your Phone Number:");
+            if (!phone) return; // User cancelled
+
+            try {
+                const res = await fetch('http://localhost:8000/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phone })
+                });
+                const data = await res.json();
+                if (data.user) {
+                    setUser(data.user);
+                    currentUser = data.user; // Use immediately
+                } else {
+                    alert("Login failed. Please try again.");
+                    return;
+                }
+            } catch (e) {
+                console.error("Login Error", e);
+                alert("Login system error. Please try again.");
+                return;
+            }
+        }
+
+        const body = currentUser ? { user_id: currentUser.phone } : {};
+        try {
+            const res = await fetch('http://localhost:8000/api/call/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            const data = await res.json();
+            setCallId(data.call_id);
+            setIsCallActive(true);
+        } catch (e) {
+            console.error("Start Call Error", e);
+            alert("Could not start call. Please check backend.");
+        }
+    };
+
+    // handleCustomerLogin removed as it's no longer used in UI directly
+
+    const handleMerchantLogin = () => {
+        if (user) {
+            const confirmLogout = window.confirm("You are currently logged in as a Customer. Switch to Merchant login? This will log you out.");
+            if (!confirmLogout) return;
+            setUser(null); // Logout customer
+        }
+        setViewMode('login');
     };
 
     if (viewMode === 'admin') {
         return (
-            <div>
+            <div style={{ position: 'relative' }}>
                 <button
-                    style={{ position: 'absolute', top: 10, right: 10, zIndex: 1000, background: '#ef4444', color: 'white', border: 'None', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer' }}
+                    style={{ position: 'absolute', top: 35, right: 40, zIndex: 1000, background: '#f8fafc', color: 'var(--text-secondary)', border: '1px solid var(--border-color)', fontWeight: 600, padding: '10px 20px', borderRadius: '12px', cursor: 'pointer', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}
                     onClick={() => setViewMode('home')}
                 >
-                    Logout
+                    Switch to Customer View ➡️
                 </button>
                 <AdminDashboard />
             </div>
         );
+    }
+
+    if (viewMode === 'history') {
+        return <OrderHistory user={user} onBack={() => setViewMode('home')} />;
     }
 
     if (viewMode === 'login') {
@@ -49,86 +107,119 @@ function App() {
         <div className="app">
             {/* Navigation */}
             <nav className="navbar">
-                <div className="logo">
-                    <div className="logo-icon">C</div>
-                    CartTalk
+                <div className="nav-left">
+                    <div className="logo" onClick={() => setViewMode('home')}>
+                        <span className="logo-icon">🛒</span>
+                        CartTalk.
+                    </div>
                 </div>
-                <div className="nav-links">
-                    <span>Solution</span>
-                    <span>Integration</span>
-                    <span>Pricing</span>
+
+                <div className="nav-center">
+                    <div className="search-bar">
+                        <input
+                            type="text"
+                            placeholder="Search for grocery, vegetables, spices..."
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                        />
+                        <button className="search-btn">🔍</button>
+                    </div>
                 </div>
-                <button className="btn-login" onClick={() => setViewMode('login')}>Merchant Login</button>
+
+                <div className="nav-right">
+                    {user && (
+                        <button className="btn-merchant" onClick={() => setViewMode('history')} style={{ color: '#10b981' }}>
+                            📋 My Orders
+                        </button>
+                    )}
+                    <button className="btn-merchant" onClick={handleMerchantLogin}>Merchant</button>
+                    <div className="user-avatar" onClick={startCall} title={user ? `Logged in: ${user.name || user.phone}` : 'Click to start shopping'}>
+                        {user ? (
+                            <span style={{ fontSize: '12px', color: 'white', fontWeight: 700 }}>
+                                {(user.name || user.phone || '?')[0].toUpperCase()}
+                            </span>
+                        ) : (
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                        )}
+                    </div>
+                    {user && <span style={{ fontSize: '12px', color: '#64748b', maxWidth: '80px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{user.name || user.phone}</span>}
+                </div>
             </nav>
 
             {!isCallActive ? (
                 <>
-
                     <div className="hero-section">
                         <div className="hero-content">
-                            <h1>Seamless, intelligent & human-like AI Shopping</h1>
+                            <h1>Speak. Shop.<br /><span className="highlight-text">Delivered.</span></h1>
+
                             <p className="hero-subtext">
-                                Experience the future of grocery shopping. Just speak naturally to our AI agent to fill your cart, check prices, and place orders instantly.
+                                Discover the freshest and finest groceries<br />
+                                delivered quickly and conveniently.
                             </p>
 
                             <div className="hero-actions">
-                                <button className="btn-start" onClick={startCall}>
-                                    Start Demo Call
+                                <button className="btn-shop-now" onClick={startCall}>
+                                    Shop Now
+                                    <span className="btn-icon">🛍️</span>
                                 </button>
-                                <button className="btn-secondary-outline">
-                                    View Documentation
-                                </button>
-                            </div>
-
-                            <div className="stats-row">
-                                <div className="stat-item">
-                                    <span className="stat-number">24/7</span>
-                                    <span className="stat-label">Availability</span>
-                                </div>
-                                <div className="stat-item">
-                                    <span className="stat-number">0.5s</span>
-                                    <span className="stat-label">Latency</span>
-                                </div>
-                                <div className="stat-item">
-                                    <span className="stat-number">100%</span>
-                                    <span className="stat-label">Hassle Free</span>
-                                </div>
                             </div>
                         </div>
 
                         <div className="hero-visual">
-                            {/* Abstract Visual Representation */}
-                            <div className="visual-card">
-                                <div className="visual-header">
-                                    <div className="dot red"></div>
-                                    <div className="dot yellow"></div>
-                                    <div className="dot green"></div>
-                                </div>
-                                <div className="visual-body">
-                                    <div className="chat-mockup user">
-                                        "I need 2kg of Tomatoes and some eggs"
-                                    </div>
-                                    <div className="chat-mockup ai">
-                                        "Added to your cart! Anything else?"
-                                    </div>
-                                    <div className="chat-mockup user">
-                                        "That will be all."
-                                    </div>
-                                    <div className="visual-wave">
-                                        <div className="bar" style={{ height: '40%' }}></div>
-                                        <div className="bar" style={{ height: '80%' }}></div>
-                                        <div className="bar" style={{ height: '60%' }}></div>
-                                        <div className="bar" style={{ height: '90%' }}></div>
-                                        <div className="bar" style={{ height: '50%' }}></div>
-                                    </div>
-                                </div>
+                            {/* AI generated image */}
+                            <img src="./my-grocery.jpeg" alt="Groceries in paper bag" className="hero-bag-img" />
+                        </div>
+                    </div>
+
+                    {/* How It Works */}
+                    <div className="how-it-works">
+                        <h2 className="section-title" style={{ textAlign: 'center', borderLeft: 'none', paddingLeft: 0 }}>How It Works</h2>
+                        <p className="section-subtitle" style={{ textAlign: 'center' }}>Three simple steps to get your groceries</p>
+                        <div className="steps-row">
+                            <div className="step-card">
+                                <div className="step-icon">🎙️</div>
+                                <div className="step-number">1</div>
+                                <h3>Speak</h3>
+                                <p>Tell our AI assistant what groceries you need — in English or Malayalam</p>
+                            </div>
+                            <div className="step-connector">→</div>
+                            <div className="step-card">
+                                <div className="step-icon">🛒</div>
+                                <div className="step-number">2</div>
+                                <h3>Cart</h3>
+                                <p>AI builds your cart automatically, suggests recipes, and calculates total</p>
+                            </div>
+                            <div className="step-connector">→</div>
+                            <div className="step-card">
+                                <div className="step-icon">🚚</div>
+                                <div className="step-number">3</div>
+                                <h3>Delivered</h3>
+                                <p>Confirm your order and get fresh groceries delivered to your doorstep</p>
                             </div>
                         </div>
                     </div>
-                    <ProductGrid />
+
+                    <ProductGrid searchQuery={searchQuery} />
                 </>
             ) : (
                 <CallInterface callId={callId} onEndCall={() => setIsCallActive(false)} />
+            )}
+
+            {/* Footer */}
+            {!isCallActive && (
+                <footer style={{
+                    textAlign: 'center',
+                    padding: '30px 20px',
+                    borderTop: '1px solid var(--border-color)',
+                    color: '#94a3b8',
+                    fontSize: '13px',
+                    marginTop: '40px'
+                }}>
+                    <div style={{ marginBottom: '8px' }}>
+                        <span style={{ fontWeight: 700, color: 'var(--text-primary)' }}>🛒 CartTalk</span> — Speak. Shop. Delivered.
+                    </div>
+                    <div>Powered by Google Gemini AI &bull; © {new Date().getFullYear()} CartTalk</div>
+                </footer>
             )}
         </div>
     );
