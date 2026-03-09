@@ -111,7 +111,6 @@ Inventory:
                 
                 # Low Stock Alerts for user's frequent items
                 if freq_items:
-                    from db import get_products
                     all_products = get_products()
                     low_stock_alerts = []
                     for fi in freq_items:
