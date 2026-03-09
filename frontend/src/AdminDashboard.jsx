@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import './AdminDashboard.css';
+import AnalyticsDashboard from './components/AnalyticsDashboard';
 
 function AdminDashboard() {
     const [orders, setOrders] = useState([]);
     const [products, setProducts] = useState([]);
-    const [activeTab, setActiveTab] = useState('overview'); // overview | orders | inventory
+    const [activeTab, setActiveTab] = useState('analytics'); // analytics | orders | inventory
     const [expandedTranscripts, setExpandedTranscripts] = useState({});
 
     const toggleTranscript = (id) => {
@@ -142,10 +143,10 @@ function AdminDashboard() {
             <div className="admin-sidebar">
                 <h2>CartTalk Admin</h2>
                 <div
-                    className={`menu-item ${activeTab === 'overview' ? 'active' : ''}`}
-                    onClick={() => setActiveTab('overview')}
+                    className={`menu-item ${activeTab === 'analytics' ? 'active' : ''}`}
+                    onClick={() => setActiveTab('analytics')}
                 >
-                    📊 Overview
+                    📈 Analytics
                 </div>
                 <div
                     className={`menu-item ${activeTab === 'orders' ? 'active' : ''}`}
@@ -162,44 +163,8 @@ function AdminDashboard() {
             </div>
 
             <div className="admin-content">
-                {activeTab === 'overview' ? (
-                    <div className="overview-view">
-                        <h3>Dashboard Overview</h3>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '20px', marginBottom: '30px' }}>
-                            <div className="metric-card">
-                                <h4>Total Revenue</h4>
-                                <div className="metric-value">₹{(orders.reduce((sum, o) => sum + (o.total || 0), 0)).toFixed(2)}</div>
-                            </div>
-                            <div className="metric-card">
-                                <h4>Pending Orders</h4>
-                                <div className="metric-value">{orders.filter(o => o.status !== 'Delivered').length}</div>
-                            </div>
-                            <div className="metric-card" style={{ background: '#fef2f2', border: '1px solid #fecaca' }}>
-                                <h4 style={{ color: '#ef4444' }}>Low Stock Items</h4>
-                                <div className="metric-value" style={{ color: '#b91c1c' }}>{products.filter(p => p.stock <= (p.safety_stock || 5)).length}</div>
-                            </div>
-                        </div>
-
-                        <h3 style={{ marginTop: '40px' }}>Low Stock Alerts</h3>
-                        {products.filter(p => p.stock <= (p.safety_stock || 5)).length > 0 ? (
-                            <table className="admin-table">
-                                <thead><tr><th>Item</th><th>Current Stock</th><th>Safe Limit</th></tr></thead>
-                                <tbody>
-                                    {products.filter(p => p.stock <= (p.safety_stock || 5)).map(p => (
-                                        <tr key={p.id}>
-                                            <td>{p.name_en}</td>
-                                            <td style={{ color: '#ef4444', fontWeight: 'bold' }}>{p.stock}</td>
-                                            <td>{p.safety_stock || 5}</td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        ) : (
-                            <div style={{ padding: '20px', background: 'white', borderRadius: '12px', border: '1px solid var(--border-color)', color: '#059669', fontWeight: 500 }}>
-                                ✅ All products are well stocked.
-                            </div>
-                        )}
-                    </div>
+                {activeTab === 'analytics' ? (
+                    <AnalyticsDashboard />
                 ) : activeTab === 'orders' ? (
                     <div className="orders-view">
                         <h3>Live Orders</h3>

@@ -63,6 +63,14 @@ def init_db():
         FOREIGN KEY(product_id) REFERENCES products(id)
     )''')
     
+    c.execute('''CREATE TABLE IF NOT EXISTS voice_logs (
+        id INTEGER PRIMARY KEY,
+        voice_input TEXT,
+        ai_interpretation TEXT,
+        action_performed TEXT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
     # Auto-Migration: Check for missing columns in existing tables
     c.execute("PRAGMA table_info(products)")
     prod_cols = [row[1] for row in c.fetchall()]

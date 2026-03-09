@@ -75,10 +75,10 @@ function App() {
         return (
             <div style={{ position: 'relative' }}>
                 <button
-                    style={{ position: 'absolute', top: 35, right: 40, zIndex: 1000, background: '#f8fafc', color: 'var(--text-secondary)', border: '1px solid var(--border-color)', fontWeight: 600, padding: '10px 20px', borderRadius: '12px', cursor: 'pointer', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}
+                    style={{ position: 'absolute', top: 15, right: 40, zIndex: 1000, background: '#f8fafc', color: '#ef4444', border: '1px solid #fecaca', fontWeight: 600, padding: '8px 16px', borderRadius: '8px', cursor: 'pointer', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}
                     onClick={() => setViewMode('home')}
                 >
-                    Switch to Customer View ➡️
+                    Logout to Store ➡️
                 </button>
                 <AdminDashboard />
             </div>

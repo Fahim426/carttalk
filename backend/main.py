@@ -12,7 +12,11 @@ from fastapi import FastAPI, UploadFile, File, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
-from services import GeminiService, InventoryService, OrderService
+from services import (
+    GeminiService, InventoryService, OrderService, get_admin_analytics,
+    get_recent_orders, get_low_stock_products, get_top_products, get_voice_logs,
+    log_voice_interaction
+)
 from db import (
     init_db, get_products, get_user, get_cart, update_user,
     get_orders_by_user, update_order_status, add_product,
@@ -129,6 +133,17 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                 # Check for termination signal
                 if result.get("terminate"):
                     await websocket.send_text(json.dumps({"type": "control", "action": "terminate"}))
+                    action_perf = "Confirmed Order & Terminated"
+                else:
+                    action_perf = f"Updated Cart" if result.get("cart") is not None else "Responded"
+                    
+                # Log voice interaction
+                if result.get("user_transcript"):
+                    log_voice_interaction(
+                        voice_input=result["user_transcript"],
+                        ai_interpretation=result.get("ai_text", ""),
+                        action_performed=action_perf
+                    )
             else:
                 # Error Case: Unblock Frontend
                 await websocket.send_json({"type": "error", "text": "Sorry, I encountered an error. Please try again."})
@@ -196,6 +211,33 @@ async def add_to_cart(data: dict):
         return {"error": "Phone required"}
     save_cart(phone, items)
     return {"status": "updated", "items_count": len(items)}
+
+# ─── Admin ───────────────────────────────────────────────────
+
+@app.get("/api/admin/analytics")
+async def get_analytics():
+    """Get merchant dashboard analytics"""
+    try:
+        return get_admin_analytics()
+    except Exception as e:
+        print(f"Error fetching analytics: {e}")
+        return {"error": "Failed to fetch analytics"}
+
+@app.get("/api/admin/recent-orders")
+async def fetch_recent_orders():
+    return get_recent_orders(limit=10)
+
+@app.get("/api/admin/low-stock")
+async def fetch_low_stock():
+    return get_low_stock_products()
+
+@app.get("/api/admin/top-products")
+async def fetch_top_products():
+    return get_top_products(limit=5)
+
+@app.get("/api/admin/voice-logs")
+async def fetch_voice_logs():
+    return get_voice_logs(limit=20)
 
 # ─── Uploads ─────────────────────────────────────────────────
 

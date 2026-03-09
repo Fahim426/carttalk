@@ -82,7 +82,7 @@ RESPONSE: [Your actual spoken reply to the user. MUST be Malayalam ONLY if they 
 
 5. JSON DATA PAYLOAD `DATA:`
    - Track items in `cart` list.
-   - If User provides their Name or Address, update `name` and `address` fields in the JSON.
+   - If User provides their Name or Address, update `name` and `address` fields in the JSON. YOU MUST ALWAYS TRANSLATE BOTH NAME AND ADDRESS TO ENGLISH IN THE JSON, regardless of the spoken language.
 
 Inventory:
 """ + inventory_context
@@ -251,14 +251,16 @@ Inventory:
                         
                     # Filter invalid IDs out and calculate actual total
                     cart_items = session.get('cart', [])
-                    valid_pids = {p['id'] for p in get_products()}
-                    valid_cart = [item for item in cart_items if item.get('id') in valid_pids]
+                    db_products = {p['id']: p['price'] for p in get_products()}
+                    valid_cart = [item for item in cart_items if item.get('id') in db_products]
                     
                     order_total = 0.0
                     for item in valid_cart:
-                        item_price = float(item.get('price', 0))
+                        # Grab correct live price from DB
+                        item_price = float(db_products.get(item.get('id'), 0))
                         item_qty = float(item.get('quantity', item.get('qty', 1)))
                         order_total += item_price * item_qty
+                        item['price'] = item_price # Embed price into valid_cart so it goes to DB
                     
                     order_payload = {
                         'phone': user_id if user_id else 'VoiceUser',
@@ -460,3 +462,180 @@ class OrderService:
     def get_all(self):
         """Get all orders"""
         return get_orders()
+
+def get_admin_analytics():
+    """
+    Service to fetch key analytics metrics for the Admin Dashboard
+    Queries the SQLite db directly.
+    """
+    import sqlite3
+    from datetime import date, timedelta
+    from db import DB_FILE
+    
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    today_str = date.today().strftime('%Y-%m-%d')
+    c.execute('''
+        SELECT COUNT(id), SUM(total)
+        FROM orders
+        WHERE date(created_at) = ?
+    ''', (today_str,))
+    orders_today, revenue_today = c.fetchone()
+    
+    c.execute('''
+        SELECT 
+            COUNT(id) as total_products,
+            SUM(CASE WHEN stock < 5 THEN 1 ELSE 0 END) as low_stock_products
+        FROM products
+    ''')
+    total_products, low_stock_products = c.fetchone()
+    
+    c.execute('''
+        SELECT p.name_en, SUM(oi.quantity) as total_qty
+        FROM order_items oi
+        JOIN products p ON oi.product_id = p.id
+        GROUP BY p.id
+        ORDER BY total_qty DESC
+        LIMIT 1
+    ''')
+    most_sold_row = c.fetchone()
+    most_sold_product = most_sold_row[0] if most_sold_row else "N/A"
+    
+    orders_last_7_days = []
+    c.execute('''
+        SELECT date(created_at) as order_date, COUNT(id) as order_count
+        FROM orders
+        WHERE date(created_at) >= date('now', '-6 days')
+        GROUP BY date(created_at)
+        ORDER BY date(created_at) ASC
+    ''')
+    db_counts = dict(c.fetchall())
+    
+    for i in range(6, -1, -1):
+        target_date = (date.today() - timedelta(days=i)).strftime('%Y-%m-%d')
+        orders_last_7_days.append({
+            "date": target_date,
+            "orders": db_counts.get(target_date, 0)
+        })
+        
+    conn.close()
+    
+    return {
+        "orders_today": orders_today or 0,
+        "revenue_today": revenue_today or 0,
+        "total_products": total_products or 0,
+        "low_stock_products": low_stock_products or 0,
+        "most_sold_product": most_sold_product,
+        "orders_last_7_days": orders_last_7_days
+    }
+
+
+def get_recent_orders(limit=10):
+    import sqlite3
+    from db import DB_FILE
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        SELECT id, customer_name, total, status, created_at
+        FROM orders
+        ORDER BY created_at DESC
+        LIMIT ?
+    ''', (limit,))
+    
+    orders = []
+    columns = [desc[0] for desc in c.description]
+    for row in c.fetchall():
+        order_dict = dict(zip(columns, row))
+        
+        # Get items for this order
+        c.execute('''
+            SELECT p.name_en, oi.quantity
+            FROM order_items oi
+            JOIN products p ON oi.product_id = p.id
+            WHERE oi.order_id = ?
+        ''', (order_dict['id'],))
+        
+        items = [f"{item[0]} (x{item[1]})" for item in c.fetchall()]
+        
+        orders.append({
+            "order_id": order_dict['id'],
+            "customer_name": order_dict['customer_name'] or "Unknown",
+            "items": ", ".join(items) if items else "No items",
+            "total_amount": order_dict['total'],
+            "status": order_dict['status'],
+            "created_at": order_dict['created_at'][:16] # Truncate seconds out
+        })
+        
+    conn.close()
+    return orders
+
+def get_low_stock_products():
+    import sqlite3
+    from db import DB_FILE
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    # Using safety_stock from earlier schema if available, else comparing against 5
+    c.execute('''
+        SELECT id, name_en, stock, safety_stock
+        FROM products
+        WHERE stock < COALESCE(safety_stock, 5)
+        ORDER BY stock ASC
+    ''')
+    
+    results = [{"product_id": row[0], "product_name": row[1], "stock": row[2], "safety_stock": row[3] or 5} for row in c.fetchall()]
+    conn.close()
+    return results
+
+def get_top_products(limit=5):
+    import sqlite3
+    from db import DB_FILE
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        SELECT p.name_en, SUM(oi.quantity) as total_orders
+        FROM order_items oi
+        JOIN products p ON oi.product_id = p.id
+        GROUP BY p.id
+        ORDER BY total_orders DESC
+        LIMIT ?
+    ''', (limit,))
+    
+    results = [{"product_name": row[0], "total_orders": row[1]} for row in c.fetchall()]
+    conn.close()
+    return results
+
+def log_voice_interaction(voice_input, ai_interpretation, action_performed):
+    import sqlite3
+    from db import DB_FILE
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    try:
+        c.execute('''
+            INSERT INTO voice_logs (voice_input, ai_interpretation, action_performed)
+            VALUES (?, ?, ?)
+        ''', (voice_input, ai_interpretation, action_performed))
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass # Table might not exist if init_db wasn't run recently
+    conn.close()
+
+def get_voice_logs(limit=20):
+    import sqlite3
+    from db import DB_FILE
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    try:
+        c.execute('''
+            SELECT id, voice_input, ai_interpretation, action_performed, timestamp
+            FROM voice_logs
+            ORDER BY timestamp DESC
+            LIMIT ?
+        ''', (limit,))
+        columns = [desc[0] for desc in c.description]
+        results = [dict(zip(columns, row)) for row in c.fetchall()]
+    except sqlite3.OperationalError:
+        results = [] # In case table doesn't exist
+    conn.close()
+    return results
