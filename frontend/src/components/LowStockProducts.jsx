@@ -1,8 +1,16 @@
 import React, { useState, useEffect } from 'react';
 
+import { useAdminWebSocket } from '../hooks/useAdminWebSocket';
+
 function LowStockProducts() {
     const [lowStock, setLowStock] = useState([]);
     const [loading, setLoading] = useState(true);
+
+    useAdminWebSocket((event) => {
+        if (event.type === 'NEW_ORDER' || event.type === 'ORDER_UPDATED' || event.type === 'INVENTORY_UPDATED') {
+            fetchLowStock();
+        }
+    });
 
     useEffect(() => {
         fetchLowStock();

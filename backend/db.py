@@ -112,18 +112,30 @@ def init_db():
     conn.commit()
     conn.close()
 
-# ... skipping seed_products body to fit context constraints ...
-
 def seed_products(conn):
-    """Seed initial product catalog.
-    Products are managed via the Admin Dashboard (Inventory tab).
-    This function is called on init but only inserts if the table is empty.
-    """
+    """Seed initial product catalog if empty"""
     c = conn.cursor()
     c.execute('SELECT COUNT(*) FROM products')
     count = c.fetchone()[0]
     if count > 0:
-        return  # Products already exist, skip seeding
+        return
+
+    sample_products = [
+        ('Basmati Rice', 'ബസുമതി അരി', 'Grains', 85, 50, 'https://images.unsplash.com/photo-1586201375761-83865001e31c?w=400'),
+        ('Tomato', 'തക്കാളി', 'Vegetables', 40, 30, 'https://images.unsplash.com/photo-1546473427-e1ad6d6622aa?w=400'),
+        ('Onion', 'സവാള', 'Vegetables', 35, 45, 'https://images.unsplash.com/photo-1508747703725-719777637510?w=400'),
+        ('Turmeric Powder', 'മഞ്ഞൾപ്പൊടി', 'Spices', 120, 20, 'https://images.unsplash.com/photo-1615485290382-441e4d049cb5?w=400'),
+        ('Fresh Milk', 'പാൽ', 'Dairy', 28, 40, 'https://images.unsplash.com/photo-1563636619-e91000f21fca?w=400'),
+        ('Curd', 'തൈര്', 'Dairy', 35, 25, 'https://images.unsplash.com/photo-1485921325833-c519f76c4927?w=400'),
+        ('Coconut Oil', 'വെളിച്ചെണ്ണ', 'Oils', 180, 15, 'https://images.unsplash.com/photo-1598214817158-54753ca1ce11?w=400')
+    ]
+    
+    c.executemany('''
+        INSERT INTO products (name_en, name_ml, category, price, stock, image_url, safety_stock)
+        VALUES (?, ?, ?, ?, ?, ?, 5)
+    ''', sample_products)
+    conn.commit()
+    print("Database seeded with sample products.")
 
 def get_products():
     """Get all products"""
@@ -142,6 +154,83 @@ def get_products():
     conn.close()
     return products
 
+def get_product_stock(product_id):
+    """Get the current live stock for a single product. Returns None if product not found."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT stock FROM products WHERE id = ?', (product_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def validate_cart_stock(cart_items):
+    """
+    Validates every item in the cart against live DB stock (minus safety_stock buffer).
+    Returns a dict:
+      {
+        'valid_cart': [...],          # cart with quantities clamped to available stock
+        'violations': [              # list of violations found
+          {'id': int, 'name': str, 'requested': float, 'available': float}
+        ]
+      }
+    """
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+
+    valid_cart = []
+    violations = []
+
+    for item in cart_items:
+        if not isinstance(item, dict):
+            continue
+        pid_raw = item.get('id') or item.get('product_id') or item.get('item_id')
+        if pid_raw is None:
+            continue
+        try:
+            pid = int(pid_raw)
+        except (ValueError, TypeError):
+            continue
+
+        qty_raw = item.get('quantity') or item.get('qty') or 1
+        try:
+            qty = float(qty_raw)
+        except (ValueError, TypeError):
+            qty = 1.0
+
+        # Fetch live stock AND safety_stock buffer from DB
+        c.execute('SELECT stock, safety_stock, name_en FROM products WHERE id = ?', (pid,))
+        row = c.fetchone()
+        if row is None:
+            # Product doesn't exist — skip it
+            violations.append({'id': pid, 'name': item.get('name', f'Product #{pid}'), 'requested': qty, 'available': 0})
+            continue
+
+        raw_stock = row[0]
+        safety = row[1] if row[1] is not None else 5
+        product_name = row[2]
+        # Enforce safety_stock buffer (same as what InventoryService shows the AI)
+        available_stock = max(0, raw_stock - safety)
+
+        if qty > available_stock:
+            violations.append({
+                'id': pid,
+                'name': product_name,
+                'requested': qty,
+                'available': available_stock
+            })
+            if available_stock > 0:
+                # Clamp to what's available
+                clamped_item = dict(item)
+                clamped_item['quantity'] = available_stock
+                clamped_item['qty'] = available_stock
+                valid_cart.append(clamped_item)
+            # If available_stock == 0, item is completely out of stock — don't add
+        else:
+            valid_cart.append(item)
+
+    conn.close()
+    return {'valid_cart': valid_cart, 'violations': violations}
+
 def create_order(order_data):
     """Create new order"""
     conn = sqlite3.connect(DB_FILE)
@@ -149,25 +238,30 @@ def create_order(order_data):
     c.execute('INSERT INTO orders (customer_phone, customer_name, customer_address, total, status, language, transcript) VALUES (?, ?, ?, ?, ?, ?, ?)',
               (order_data.get('phone'), order_data.get('name'), order_data.get('address'), order_data.get('total'), 'completed', order_data.get('language'), order_data.get('transcript')))
     order_id = c.lastrowid
-    
-    
+
     # Add order items and deduct stock
+    import re as _re
     items = order_data.get('items', [])
     for item in items:
+        if not isinstance(item, dict):
+            continue
         product_id = item.get('product_id') or item.get('id')
-        qty = item.get('quantity') or item.get('qty') or 1
+        # BUG 3 FIX: Always parse qty to float — AI may send strings like "0.5"
+        qty_raw = str(item.get('quantity') or item.get('qty') or 1)
+        q_match = _re.search(r'[\d\.]+', qty_raw)
+        qty = float(q_match.group()) if q_match else 1.0
         price = item.get('price', 0)
-        
-        # 1. Deduct Stock
+
+        # 1. Deduct Stock atomically (only if sufficient stock exists)
         c.execute('UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?', (qty, product_id, qty))
-        
+
         if c.rowcount > 0:
-             # 2. Insert Item only if stock deducted
-             c.execute('INSERT INTO order_items (order_id, product_id, quantity, price) VALUES (?, ?, ?, ?)',
-                       (order_id, product_id, qty, price))
+            # 2. Insert Item only if stock was successfully deducted
+            c.execute('INSERT INTO order_items (order_id, product_id, quantity, price) VALUES (?, ?, ?, ?)',
+                      (order_id, product_id, qty, price))
         else:
             print(f"Warning: Stock deduction failed for Product {product_id} (Insufficient Stock or Invalid ID). Item NOT added to order.")
-                  
+
     conn.commit()
     conn.close()
     return {'order_id': order_id, 'total': order_data.get('total'), 'status': 'confirmed'}
@@ -241,9 +335,8 @@ def update_product(product_id, data):
         conn.close()
         return None
         
-    values.append(product_id)
     query = f"UPDATE products SET {', '.join(fields)} WHERE id = ?"
-    
+    values.append(product_id)
     c.execute(query, values)
     conn.commit()
     conn.close()
@@ -358,18 +451,22 @@ def save_cart(phone, items):
     """Replace user's cart with new items"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    
+
     # clear old cart
     c.execute('DELETE FROM cart_items WHERE phone = ?', (phone,))
-    
+
     # add new
     for item in items:
-        # Assuming item has 'id' (product_id) and 'qty'
-        pid = item.get('id') or item.get('product_id')
-        qty = item.get('qty') or item.get('quantity')
-        if pid and qty:
+        if not isinstance(item, dict):
+            print(f"Skipping malformed cart item: {item}")
+            continue
+
+        pid = item.get('id') or item.get('product_id') or item.get('item_id')
+        qty = item.get('qty') if item.get('qty') is not None else item.get('quantity')
+        # BUG 10 FIX: Use explicit None check — qty=0 is falsy but valid
+        if pid is not None and qty is not None:
             c.execute('INSERT INTO cart_items (phone, product_id, quantity) VALUES (?, ?, ?)', (phone, pid, qty))
-            
+
     conn.commit()
     conn.close()
 

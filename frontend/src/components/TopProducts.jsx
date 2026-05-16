@@ -1,8 +1,16 @@
 import React, { useState, useEffect } from 'react';
 
+import { useAdminWebSocket } from '../hooks/useAdminWebSocket';
+
 function TopProducts() {
     const [products, setProducts] = useState([]);
     const [loading, setLoading] = useState(true);
+
+    useAdminWebSocket((event) => {
+        if (event.type === 'NEW_ORDER' || event.type === 'ORDER_UPDATED') {
+            fetchTopProducts();
+        }
+    });
 
     useEffect(() => {
         fetchTopProducts();

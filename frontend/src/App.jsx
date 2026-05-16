@@ -4,6 +4,8 @@ import AdminDashboard from './AdminDashboard';
 import AdminLogin from './AdminLogin';
 import ProductGrid from './ProductGrid';
 import OrderHistory from './OrderHistory';
+import Logo from './components/Logo';
+import { SpeakIcon, SmartCartIcon, CheckoutIcon } from './components/Icons';
 import './App.css';
 
 function App() {
@@ -108,9 +110,8 @@ function App() {
             {/* Navigation */}
             <nav className="navbar">
                 <div className="nav-left">
-                    <div className="logo" onClick={() => setViewMode('home')}>
-                        <span className="logo-icon">🛒</span>
-                        CartTalk.
+                    <div onClick={() => setViewMode('home')}>
+                        <Logo size={36} showText={true} />
                     </div>
                 </div>
 
@@ -171,30 +172,44 @@ function App() {
                         </div>
                     </div>
 
+                    {/* Stats Summary */}
+                    <div className="stats-row">
+                        <div className="stat-item">
+                            <span className="stat-value">50k+</span>
+                            <span className="stat-label">Happy Users</span>
+                        </div>
+                        <div className="stat-item">
+                            <span className="stat-value">2min</span>
+                            <span className="stat-label">Avg. Order Time</span>
+                        </div>
+                        <div className="stat-item">
+                            <span className="stat-value">99%</span>
+                            <span className="stat-label">Delivery Accuracy</span>
+                        </div>
+                    </div>
+
                     {/* How It Works */}
                     <div className="how-it-works">
-                        <h2 className="section-title" style={{ textAlign: 'center', borderLeft: 'none', paddingLeft: 0 }}>How It Works</h2>
-                        <p className="section-subtitle" style={{ textAlign: 'center' }}>Three simple steps to get your groceries</p>
+                        <h2 className="section-title">How It Works</h2>
+                        <p className="section-subtitle">Three simple steps to grocery bliss</p>
                         <div className="steps-row">
                             <div className="step-card">
-                                <div className="step-icon">🎙️</div>
+                                <div className="step-icon" style={{ marginBottom: '16px' }}><SpeakIcon /></div>
                                 <div className="step-number">1</div>
-                                <h3>Speak</h3>
-                                <p>Tell our AI assistant what groceries you need — in English or Malayalam</p>
+                                <h3>Speak naturally</h3>
+                                <p>Just tell our AI assistant what you need — in English or Malayalam.</p>
                             </div>
-                            <div className="step-connector">→</div>
                             <div className="step-card">
-                                <div className="step-icon">🛒</div>
+                                <div className="step-icon" style={{ marginBottom: '16px' }}><SmartCartIcon /></div>
                                 <div className="step-number">2</div>
-                                <h3>Cart</h3>
-                                <p>AI builds your cart automatically, suggests recipes, and calculates total</p>
+                                <h3>Smart cart</h3>
+                                <p>AI identifies items, suggests recipes, and builds your basket instantly.</p>
                             </div>
-                            <div className="step-connector">→</div>
                             <div className="step-card">
-                                <div className="step-icon">🚚</div>
+                                <div className="step-icon" style={{ marginBottom: '16px' }}><CheckoutIcon /></div>
                                 <div className="step-number">3</div>
-                                <h3>Delivered</h3>
-                                <p>Confirm your order and get fresh groceries delivered to your doorstep</p>
+                                <h3>One-tap checkout</h3>
+                                <p>Confirm your order with a single click and relax while we deliver.</p>
                             </div>
                         </div>
                     </div>
@@ -215,8 +230,9 @@ function App() {
                     fontSize: '13px',
                     marginTop: '40px'
                 }}>
-                    <div style={{ marginBottom: '8px' }}>
-                        <span style={{ fontWeight: 700, color: 'var(--text-primary)' }}>🛒 CartTalk</span> — Speak. Shop. Delivered.
+                    <div style={{ marginBottom: '8px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px' }}>
+                        <Logo size={20} showText={false} />
+                        <span style={{ fontWeight: 700, color: 'var(--text-primary)' }}>CartTalk</span> — Speak. Shop. Delivered.
                     </div>
                     <div>Powered by Google Gemini AI &bull; © {new Date().getFullYear()} CartTalk</div>
                 </footer>

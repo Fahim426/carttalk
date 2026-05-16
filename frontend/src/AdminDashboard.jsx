@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import './AdminDashboard.css';
 import AnalyticsDashboard from './components/AnalyticsDashboard';
+import { useAdminWebSocket } from './hooks/useAdminWebSocket';
 
 function AdminDashboard() {
     const [orders, setOrders] = useState([]);
@@ -12,14 +13,19 @@ function AdminDashboard() {
         setExpandedTranscripts(prev => ({ ...prev, [id]: !prev[id] }));
     };
 
+    useAdminWebSocket((event) => {
+        if (event.type === 'NEW_ORDER' || event.type === 'ORDER_UPDATED') {
+            fetchOrders();
+        }
+        if (event.type === 'INVENTORY_UPDATED') {
+            fetchProducts();
+        }
+    });
+
     // Auto-refresh initial data
     useEffect(() => {
         fetchOrders();
         fetchProducts(); // Need products initially for Low Stock Dashboard
-        const interval = setInterval(() => {
-            fetchOrders();
-        }, 5000);
-        return () => clearInterval(interval);
     }, []);
 
     const fetchOrders = async () => {
@@ -135,6 +141,31 @@ function AdminDashboard() {
             fetchProducts();
         } catch (e) {
             alert("Failed to delete product");
+        }
+    };
+
+    const handleInlineUpdate = async (id, field, value) => {
+        // Build payload
+        let castValue = value;
+        if (field === 'price' || field === 'stock' || field === 'safety_stock') {
+            castValue = parseFloat(value);
+            if (isNaN(castValue)) return;
+        }
+
+        // Optimistic UI update
+        setProducts(products.map(p => p.id === id ? { ...p, [field]: castValue } : p));
+        
+        // Save to backend
+        try {
+            await fetch(`http://localhost:8000/api/products/${id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ [field]: castValue })
+            });
+            // Background sync comes from websocket
+        } catch (e) {
+            console.error(e);
+            fetchProducts();
         }
     };
 
@@ -273,7 +304,7 @@ function AdminDashboard() {
                                         <input type="file" onChange={handleUpload} style={{ position: 'absolute', left: 0, top: 0, opacity: 0, cursor: 'pointer' }} />
                                     </div>
                                 </div>
-                                {newProduct.image_url && <img src={newProduct.image_url} alt="preview" style={{ width: '50px', height: '50px', borderRadius: '4px', marginTop: '5px' }} />}
+                                {newProduct.image_url && <img src={newProduct.image_url} alt="preview" onError={(e) => { e.target.onerror = null; e.target.src = 'https://images.unsplash.com/photo-1606326608606-aa0b62935f2b?w=100&q=80'; }} style={{ width: '50px', height: '50px', borderRadius: '4px', marginTop: '5px', objectFit: 'cover' }} />}
 
                                 <div style={{ gridColumn: 'span 2', display: 'flex', gap: '10px', marginTop: '10px' }}>
                                     <button type="submit">{editingId ? 'Update' : 'Save'}</button>
@@ -300,15 +331,34 @@ function AdminDashboard() {
                                     <tr key={p.id}>
                                         <td>{p.id}</td>
                                         <td>
-                                            {p.image_url && <img src={p.image_url} alt="" style={{ width: 30, height: 30, borderRadius: 4, objectFit: 'cover' }} />}
+                                            {p.image_url && <img src={p.image_url} alt="" onError={(e) => { e.target.onerror = null; e.target.src = 'https://images.unsplash.com/photo-1606326608606-aa0b62935f2b?w=100&q=80'; }} style={{ width: 30, height: 30, borderRadius: 4, objectFit: 'cover' }} />}
                                         </td>
                                         <td>{p.name_en} / {p.name_ml}</td>
                                         <td>{p.category}</td>
                                         <td style={{ color: p.stock < 10 ? 'red' : 'inherit', fontWeight: 'bold' }}>
-                                            {p.stock}
+                                            <input 
+                                                type="number" 
+                                                defaultValue={p.stock} 
+                                                onBlur={(e) => { if (e.target.value != p.stock) handleInlineUpdate(p.id, 'stock', e.target.value) }}
+                                                style={{ width: '60px', background: 'transparent', border: 'none', color: 'inherit', fontWeight: 'bold', borderBottom: '1px dashed #cbd5e1', cursor: 'edit' }}
+                                                title="Click to edit stock inline"
+                                            />
                                         </td>
-                                        <td>{p.safety_stock || 5}</td>
-                                        <td>₹{p.price}</td>
+                                        <td>
+                                            <input 
+                                                type="number" 
+                                                defaultValue={p.safety_stock || 5} 
+                                                onBlur={(e) => { if (e.target.value != (p.safety_stock || 5)) handleInlineUpdate(p.id, 'safety_stock', e.target.value) }}
+                                                style={{ width: '60px', background: 'transparent', border: 'none', color: 'inherit', borderBottom: '1px dashed #cbd5e1', cursor: 'edit' }}
+                                            />
+                                        </td>
+                                        <td>₹<input 
+                                                type="number" 
+                                                defaultValue={p.price} 
+                                                onBlur={(e) => { if (e.target.value != p.price) handleInlineUpdate(p.id, 'price', e.target.value) }}
+                                                style={{ width: '60px', background: 'transparent', border: 'none', color: 'inherit', borderBottom: '1px dashed #cbd5e1', cursor: 'edit' }}
+                                            />
+                                        </td>
                                         <td>
                                             <button style={{ fontSize: '12px', padding: '4px 8px' }} onClick={() => handleEdit(p)}>
                                                 ✏️ Edit

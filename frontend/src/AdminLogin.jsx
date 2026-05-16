@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import './AdminLogin.css';
+import Logo from './components/Logo';
 
 function AdminLogin({ onLogin }) {
     const [isLoginView, setIsLoginView] = useState(true);
@@ -79,7 +80,7 @@ function AdminLogin({ onLogin }) {
         <div className="login-container">
             <div className="login-card">
                 <div className="login-header">
-                    <div className="logo-icon-lg">🛒</div>
+                    <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '16px' }}><Logo size={64} showText={false} /></div>
                     <h2>{isLoginView ? 'Merchant Login' : 'Create Account'}</h2>
                     <p>{isLoginView ? 'Enter your credentials to access the dashboard' : 'Start managing your store inventory today'}</p>
                 </div>

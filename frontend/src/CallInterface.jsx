@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
+import './CallInterface.css';
+import Logo from './components/Logo';
 
 function CallInterface({ callId, onEndCall }) {
     const [status, setStatus] = useState('initializing'); // initializing, listening, speaking, processing, ai_speaking
-    const statusRef = useRef('initializing'); // Keep track immediately for logic without stale closures
+    const statusRef = useRef('initializing'); 
     const setStatusWithRef = (newStatus) => {
         statusRef.current = newStatus;
         setStatus(newStatus);
@@ -10,27 +12,18 @@ function CallInterface({ callId, onEndCall }) {
     const [messages, setMessages] = useState([]);
     const [cart, setCart] = useState([]);
     const [orderConfirmed, setOrderConfirmed] = useState(false);
+    const [stockWarning, setStockWarning] = useState('');
 
-    // Refs for audio
     const wsRef = useRef(null);
     const audioContextRef = useRef(null);
     const mediaStreamRef = useRef(null);
     const analyserRef = useRef(null);
-    const silenceTimerRef = useRef(null);
-    const isSpeakingRef = useRef(false);
     const currentAudioRef = useRef(null);
-    const audioChunksRef = useRef([]);
     const endCallAfterAudioRef = useRef(false);
 
-    const VAD_THRESHOLD = 35; // Increased threshold to avoid background noise triggering quota exhaustion
-
-    const SILENCE_DURATION = 1500;
-
-    // Scroll ref
     const chatEndRef = useRef(null);
 
     useEffect(() => {
-        // Scroll to bottom
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [messages, status]);
 
@@ -39,117 +32,142 @@ function CallInterface({ callId, onEndCall }) {
 
         wsRef.current.onopen = () => {
             console.log("WebSocket connected");
+            setStatusWithRef('listening');
             startListening();
         };
 
-        wsRef.current.onmessage = (event) => {
-            // 1. Text Message (JSON)
+        wsRef.current.onmessage = async (event) => {
             if (typeof event.data === 'string') {
                 try {
                     const msg = JSON.parse(event.data);
-
-                    if (msg.type === 'transcript') {
-                        setMessages(prev => [...prev, { role: msg.role, text: msg.text }]);
+                    if (msg.type === 'transcript') setMessages(prev => [...prev, { role: msg.role, text: msg.text }]);
+                    if (msg.type === 'cart') setCart(msg.cart || []);
+                    if (msg.type === 'control' && msg.action === 'terminate') endCallAfterAudioRef.current = true;
+                    if (msg.type === 'stock_warning') {
+                        setStockWarning(msg.text);
+                        // Auto-dismiss after 8 seconds
+                        setTimeout(() => setStockWarning(''), 8000);
                     }
-
-                    if (msg.type === 'cart') {
-                        setCart(msg.cart || []);
-                    }
-
-                    if (msg.type === 'control' && msg.action === 'terminate') {
-                        endCallAfterAudioRef.current = true;
-                        // Trigger immediately if no audio reply was generated/received
-                        if (!currentAudioRef.current) {
-                            setOrderConfirmed(true);
-                        }
-                    }
-
                     if (msg.type === 'error') {
-                        // Unblock UI
                         setStatusWithRef('listening');
-                        alert(msg.text); // Optional visual feedback
+                        alert(msg.text);
                         startListening();
                     }
-
                 } catch (e) { console.error(e); }
                 return;
             }
 
-            // 2. Audio Message (Binary)
-            if (event.data.size === 0) {
-                setStatusWithRef('listening');
-                startListening();
-                return;
+            if (event.data.size > 0) {
+                setStatusWithRef('ai_speaking');
+                if (recognitionRef.current) {
+                    try { recognitionRef.current.stop(); } catch(e) {}
+                }
+
+                const blob = new Blob([event.data], { type: 'audio/mp3' });
+                const url = URL.createObjectURL(blob);
+                const audio = new Audio(url);
+                currentAudioRef.current = audio;
+
+                audio.onended = () => {
+                    URL.revokeObjectURL(url);
+                    currentAudioRef.current = null;
+                    if (endCallAfterAudioRef.current) {
+                        setOrderConfirmed(true);
+                    } else {
+                        setStatusWithRef('listening');
+                        startListening();
+                    }
+                };
+                audio.play().catch(e => {
+                    console.error("Audio play error", e);
+                    if (endCallAfterAudioRef.current) setOrderConfirmed(true);
+                    else startListening();
+                });
             }
-
-            setStatusWithRef('ai_speaking');
-
-            const blob = new Blob([event.data], { type: 'audio/mp3' });
-            const url = URL.createObjectURL(blob);
-            const audio = new Audio(url);
-            currentAudioRef.current = audio;
-
-            audio.onprev = () => { }; // No-op
-
-            audio.onended = () => {
-                currentAudioRef.current = null;
-                setIsSpeaking(false);
-
-                if (endCallAfterAudioRef.current) {
-                    setOrderConfirmed(true);
-                    return;
-                }
-
-                setStatusWithRef('listening');
-                startListening();
-            };
-
-            audio.play().catch(e => {
-                console.error("Audio play error", e);
-                currentAudioRef.current = null;
-
-                if (endCallAfterAudioRef.current) {
-                    setOrderConfirmed(true);
-                    return;
-                }
-                startListening();
-            });
         };
 
         wsRef.current.onerror = (e) => console.error("WS Error", e);
-
+        wsRef.current.onclose = () => {
+            if (!endCallAfterAudioRef.current) {
+                setStatusWithRef('disconnected');
+            }
+        };
         return () => { stopEverything(); };
     }, [callId]);
 
-    const setIsSpeaking = (val) => { isSpeakingRef.current = val; }
+    const recognitionRef = useRef(null);
+    const [interimTranscript, setInterimTranscript] = useState('');
 
     const startListening = async () => {
         try {
-            if (audioContextRef.current?.state === 'suspended') {
+            if (!audioContextRef.current) {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaStreamRef.current = stream;
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                audioContextRef.current = audioContext;
+                const source = audioContext.createMediaStreamSource(stream);
+                const analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                source.connect(analyser);
+                analyserRef.current = analyser;
+                detectVoiceActivity();
+            } else if (audioContextRef.current.state === 'suspended') {
                 await audioContextRef.current.resume();
             }
-            if (mediaStreamRef.current) {
-                setStatusWithRef('listening');
-                detectVoiceActivity();
-                return;
+
+            if (!recognitionRef.current) {
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                if (!SpeechRecognition) {
+                    alert("Your browser does not support Speech Recognition. Please use Chrome.");
+                    return;
+                }
+                const recognition = new SpeechRecognition();
+                recognition.continuous = true; 
+                recognition.interimResults = true;
+                recognition.lang = 'en-IN'; // en-IN handles both English and Malayalam phonetics correctly
+
+                recognition.onstart = () => {
+                    setStatusWithRef('listening');
+                    setInterimTranscript('');
+                };
+
+                recognition.onresult = (event) => {
+                    let finalTranscript = '';
+                    let interim = '';
+                    for (let i = event.resultIndex; i < event.results.length; ++i) {
+                        if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript;
+                        else interim += event.results[i][0].transcript;
+                    }
+                    if (interim) {
+                        setInterimTranscript(interim);
+                        if (statusRef.current !== 'speaking') setStatusWithRef('speaking');
+                    }
+                    if (finalTranscript) {
+                        setInterimTranscript('');
+                        sendTextAndProcess(finalTranscript);
+                    }
+                };
+
+                recognition.onend = () => {
+                    if (statusRef.current === 'listening' || statusRef.current === 'speaking' || statusRef.current === 'user_voice_detected') {
+                        try { recognition.start(); } catch(e) {}
+                    }
+                };
+                recognitionRef.current = recognition;
             }
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaStreamRef.current = stream;
+            try {
+                if (statusRef.current !== 'processing' && statusRef.current !== 'ai_speaking') {
+                    recognitionRef.current.start();
+                }
+            } catch (e) {}
+        } catch (e) { console.error(e); }
+    };
 
-            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            audioContextRef.current = audioContext;
-
-            const source = audioContext.createMediaStreamSource(stream);
-            const analyser = audioContext.createAnalyser();
-            analyser.fftSize = 512;
-            source.connect(analyser);
-            analyserRef.current = analyser;
-
-            setStatusWithRef('listening');
-            detectVoiceActivity();
-        } catch (e) {
-            console.error(e);
-            setMessages(prev => [...prev, { role: 'system', text: "Microphone Access Denied" }]);
+    const sendTextAndProcess = (text) => {
+        if (!text.trim()) return;
+        setStatusWithRef('processing');
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'text', text: text }));
         }
     };
 
@@ -157,97 +175,64 @@ function CallInterface({ callId, onEndCall }) {
         if (wsRef.current) wsRef.current.close();
         if (mediaStreamRef.current) mediaStreamRef.current.getTracks().forEach(t => t.stop());
         if (audioContextRef.current) audioContextRef.current.close();
+        if (recognitionRef.current) recognitionRef.current.stop();
         if (currentAudioRef.current) {
             currentAudioRef.current.pause();
             currentAudioRef.current = null;
         }
-        clearTimeout(silenceTimerRef.current);
     };
 
     const loopRef = useRef(null);
     const detectVoiceActivity = () => {
         if (!analyserRef.current) return;
-        if (loopRef.current) {
-            cancelAnimationFrame(loopRef.current);
-            loopRef.current = null;
-        }
+        if (loopRef.current) cancelAnimationFrame(loopRef.current);
         loop();
     };
-
 
     const loop = () => {
         if (!analyserRef.current) return;
         const bufferLength = analyserRef.current.frequencyBinCount;
         const dataArray = new Uint8Array(bufferLength);
         analyserRef.current.getByteFrequencyData(dataArray);
-        const volume = dataArray.reduce((a, b) => a + b) / bufferLength;
 
-        if (volume > VAD_THRESHOLD) {
-            if (!isSpeakingRef.current) {
-                isSpeakingRef.current = true;
-                setStatusWithRef('speaking');
-                startRecordingChunk();
-            }
-            if (silenceTimerRef.current) {
-                clearTimeout(silenceTimerRef.current);
-                silenceTimerRef.current = null;
-            }
-        } else if (isSpeakingRef.current) {
-            if (!silenceTimerRef.current) {
-                silenceTimerRef.current = setTimeout(() => {
-                    stopRecordingAndSend();
-                    if (loopRef.current) {
-                        cancelAnimationFrame(loopRef.current);
-                        loopRef.current = null;
-                    }
-                    return;
-                }, SILENCE_DURATION);
-            }
+        // Calculate volume for status feedback
+        let sum = 0;
+        for (let i = 0; i < bufferLength; i++) sum += dataArray[i];
+        const average = sum / bufferLength;
+
+        // Threshold for "User Speaking" visual feedback (approx 15-20 for normal speech)
+        if (average > 15 && statusRef.current === 'listening') {
+            setStatusWithRef('user_voice_detected');
+        } else if (average < 5 && statusRef.current === 'user_voice_detected') {
+            setStatusWithRef('listening');
         }
 
-        // Stop the loop completely if we are processing or playing AI audio
-        // The startListening function will restart it when appropriate.
-        if (!isSpeakingRef.current && statusRef && (statusRef.current === 'processing' || statusRef.current === 'ai_speaking')) {
-            return;
+        const canvas = document.getElementById('voice-visualizer');
+        if (canvas) {
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width;
+            const h = canvas.height;
+            ctx.clearRect(0, 0, w, h);
+            const barWidth = (w / bufferLength) * 2.5;
+            let x = 0;
+            for(let i = 0; i < bufferLength; i++) {
+                const barHeight = dataArray[i] / 4;
+                ctx.fillStyle = i % 2 === 0 ? '#fb923c' : '#f97316';
+                ctx.fillRect(x, h - barHeight, barWidth, barHeight);
+                x += barWidth + 1;
+            }
         }
-
         loopRef.current = requestAnimationFrame(loop);
-    };
-
-    const recorderRef = useRef(null);
-    const startRecordingChunk = () => {
-        if (recorderRef.current && recorderRef.current.state !== 'inactive') return;
-        try {
-            const recorder = new MediaRecorder(mediaStreamRef.current);
-            recorderRef.current = recorder;
-            audioChunksRef.current = [];
-            recorder.ondataavailable = (e) => {
-                if (e.data.size > 0) audioChunksRef.current.push(e.data);
-            };
-            recorder.start();
-        } catch (e) { console.error(e); }
-    };
-
-    const stopRecordingAndSend = () => {
-        if (!recorderRef.current) return;
-        setStatusWithRef('processing');
-        isSpeakingRef.current = false;
-        recorderRef.current.onstop = () => {
-            const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                wsRef.current.send(blob);
-            }
-            audioChunksRef.current = [];
-        };
-        recorderRef.current.stop();
     };
 
     const getStatusLabel = () => {
         switch (status) {
             case 'listening': return 'Listening...';
-            case 'speaking': return 'User Speaking...';
+            case 'user_voice_detected':
+            case 'speaking': return 'User Speaking';
             case 'processing': return 'Thinking...';
-            case 'ai_speaking': return 'Agent Speaking...';
+            case 'ai_speaking': return 'Agent Speaking';
+            case 'disconnected': return 'Connection Lost';
             default: return 'Connecting...';
         }
     };
@@ -255,26 +240,26 @@ function CallInterface({ callId, onEndCall }) {
     if (orderConfirmed) {
         const cartTotal = cart.reduce((sum, item) => sum + (parseFloat(item.price || 0) * parseFloat(item.qty || item.quantity || 1)), 0);
         return (
-            <div className="dashboard-container" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', background: '#f8fafc' }}>
-                <div style={{ background: 'white', padding: '40px', borderRadius: '16px', boxShadow: '0 4px 20px rgba(0,0,0,0.1)', textAlign: 'center', maxWidth: '420px', width: '100%' }}>
-                    <div style={{ fontSize: '64px', color: '#10b981', marginBottom: '16px' }}>✅</div>
-                    <h2 style={{ marginBottom: '6px' }}>Order Confirmed!</h2>
-                    <p style={{ color: '#64748b', marginBottom: '24px', fontSize: '14px' }}>Your groceries will be delivered shortly.</p>
+            <div className="confirmation-container">
+                <div className="confirmation-card">
+                    <span className="success-icon">✅</span>
+                    <h2>Order Confirmed!</h2>
+                    <p style={{ color: '#64748b', marginBottom: '24px' }}>Your groceries will be delivered shortly.</p>
 
                     {cart.length > 0 && (
-                        <div style={{ textAlign: 'left', marginBottom: '24px' }}>
-                            <div style={{ fontSize: '13px', fontWeight: 700, color: '#475569', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Order Summary</div>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                        <div style={{ textAlign: 'left', marginBottom: '32px' }}>
+                            <div className="summary-title">Order Summary</div>
+                            <div>
                                 {cart.map((item, idx) => (
-                                    <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: '#f8fafc', borderRadius: '8px', fontSize: '13px' }}>
-                                        <span style={{ color: '#334155', fontWeight: 500 }}>{item.name || `Item #${item.id}`}</span>
-                                        <span style={{ color: '#64748b' }}>x{item.qty || item.quantity} — ₹{(parseFloat(item.price || 0) * parseFloat(item.qty || item.quantity || 1)).toFixed(0)}</span>
+                                    <div key={idx} className="summary-item">
+                                        <span style={{ fontWeight: 600 }}>{item.name || `Item #${item.id}`}</span>
+                                        <span>x{item.qty || item.quantity} — ₹{(parseFloat(item.price || 0) * parseFloat(item.qty || item.quantity || 1)).toFixed(0)}</span>
                                     </div>
                                 ))}
                             </div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '12px', padding: '12px', background: '#ecfdf5', borderRadius: '10px', fontWeight: 700 }}>
-                                <span style={{ color: '#475569' }}>Total</span>
-                                <span style={{ color: '#059669', fontSize: '16px' }}>₹{cartTotal.toFixed(2)}</span>
+                            <div className="cart-total-container" style={{ marginTop: '16px' }}>
+                                <span>Grand Total</span>
+                                <span style={{ color: '#059669', fontSize: '18px' }}>₹{cartTotal.toFixed(2)}</span>
                             </div>
                         </div>
                     )}
@@ -282,54 +267,46 @@ function CallInterface({ callId, onEndCall }) {
                     <button className="btn-start" onClick={onEndCall} style={{ width: '100%' }}>
                         Return to Store
                     </button>
-                    <p style={{ fontSize: '12px', color: '#94a3b8', marginTop: '12px' }}>Thank you for using CartTalk 🛒</p>
+                    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '6px', marginTop: '16px', fontSize: '12px', color: '#94a3b8' }}>
+                        Thank you for using CartTalk <Logo size={16} showText={false} />
+                    </div>
                 </div>
             </div>
         );
     }
 
     return (
-        <div className="dashboard-container">
-            {/* Sidebar */}
-            <div className="sidebar" style={{ display: 'flex', flexDirection: 'column' }}>
+        <div className="call-interface-container">
+            <div className="sidebar">
                 <div className="agent-info">
-                    <div className={`agent-avatar ${status === 'listening' || status === 'ai_speaking' ? 'animate-glow' : ''}`}>🛒</div>
-                    <div className="agent-name">CartTalk Agent</div>
-                    <div className="agent-status">
-                        <div className="status-dot"></div> Online
+                    <div className={`agent-avatar ${status === 'listening' || status === 'ai_speaking' ? 'animate-glow' : ''}`} style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+                        <Logo size={40} showText={false} />
+                    </div>
+                    <div className="agent-name">CartTalk Assistant</div>
+                    <div className="agent-status"><div className="status-dot"></div> Online</div>
+                    <div className="visualizer-container">
+                        <canvas id="voice-visualizer" width="200" height="40"></canvas>
                     </div>
                 </div>
 
-                {/* Cart Visualization */}
-                <div style={{ marginTop: '20px', flex: 1, overflowY: 'auto' }}>
-                    <div style={{ fontSize: '14px', fontWeight: 'bold', color: '#475569', marginBottom: '12px' }}>Your Cart</div>
+                <div className="cart-section">
+                    <div className="cart-title">Live Cart</div>
                     {cart.length === 0 ? (
-                        <div style={{ fontSize: '13px', color: '#94a3b8', fontStyle: 'italic' }}>Cart is empty</div>
+                        <div className="cart-empty">Your cart is empty</div>
                     ) : (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        <div>
                             {cart.map((item, idx) => (
-                                <div key={idx} style={{ background: '#f1f5f9', padding: '10px', borderRadius: '8px', fontSize: '13px', display: 'flex', justifyContent: 'space-between' }}>
-                                    <span style={{ fontWeight: '500', color: '#334155', maxWidth: '120px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.name || `Item #${item.id || item.product_id}`}</span>
-                                    <span style={{ color: '#64748b' }}>x{item.qty || item.quantity}</span>
+                                <div key={idx} className="cart-item">
+                                    <span className="cart-item-name">{item.name || `Item #${item.id || item.product_id}`}</span>
+                                    <span>x{item.qty || item.quantity}</span>
                                 </div>
                             ))}
                         </div>
                     )}
                 </div>
 
-                {/* Cart Total */}
                 {cart.length > 0 && (
-                    <div style={{
-                        marginTop: '12px',
-                        padding: '12px',
-                        background: '#ecfdf5',
-                        borderRadius: '10px',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        fontSize: '14px',
-                        fontWeight: '700'
-                    }}>
+                    <div className="cart-total-container">
                         <span style={{ color: '#475569' }}>Total</span>
                         <span style={{ color: '#059669' }}>
                             ₹{cart.reduce((sum, item) => sum + (parseFloat(item.price || 0) * parseFloat(item.qty || item.quantity || 1)), 0).toFixed(2)}
@@ -337,42 +314,69 @@ function CallInterface({ callId, onEndCall }) {
                     </div>
                 )}
 
-                <div style={{ marginTop: '20px' }}>
-                    <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '8px' }}>CALL ID</div>
-                    <div style={{ fontSize: '14px', fontFamily: 'monospace', color: '#64748b' }}>{callId.slice(0, 8)}...</div>
+                <div style={{ marginTop: 'auto', paddingTop: '20px' }}>
+                    <div style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '1px' }}>Call Identity</div>
+                    <div style={{ fontSize: '12px', fontFamily: 'monospace', color: '#cbd5e1' }}>{callId.slice(0, 12)}</div>
                 </div>
             </div>
 
-            {/* Main Chat Area */}
             <div className="main-content">
                 <div className="chat-area">
                     {messages.length === 0 && (
-                        <div style={{ textAlign: 'center', color: '#94a3b8', marginTop: '100px' }}>
-                            <div style={{ fontSize: '48px', marginBottom: '16px' }}>👋</div>
-                            <p>Say "Hello" to start shopping!</p>
+                        <div className="chat-empty-state">
+                            <div style={{ fontSize: '56px', marginBottom: '20px' }}>🎙️</div>
+                            <h3>Voice Shopping Active</h3>
+                            <p>Try saying "Add 2kg tomatoes" or "How to make chicken curry?"</p>
                         </div>
                     )}
 
                     {messages.map((msg, i) => (
                         <div key={i} className={`message ${msg.role}`}>
-                            <div className="bubble">
-                                {msg.text}
-                            </div>
+                            <div className="bubble">{msg.text}</div>
                         </div>
                     ))}
 
-                    {/* Thinking Indicator */}
                     {status === 'processing' && (
                         <div className="message ai">
-                            <div className="bubble" style={{ fontStyle: 'italic', color: '#94a3b8' }}>
-                                Thinking...
+                            <div className="bubble thinking-bubble">
+                                <div className="dot-flashing"></div>
+                                <span style={{ marginLeft: '15px' }}>Thinking...</span>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {interimTranscript && (
+                        <div className="message user" style={{ opacity: 0.6 }}>
+                            <div className="bubble" style={{ borderStyle: 'dashed', borderWidth: '2px' }}>
+                                {interimTranscript}...
                             </div>
                         </div>
                     )}
                     <div ref={chatEndRef} />
                 </div>
 
-                {/* Bottom Controls */}
+                {stockWarning && (
+                    <div style={{
+                        margin: '0 0 12px 0',
+                        padding: '12px 16px',
+                        background: 'rgba(239,68,68,0.15)',
+                        border: '1px solid rgba(239,68,68,0.5)',
+                        borderRadius: '10px',
+                        color: '#fca5a5',
+                        fontSize: '13px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '10px'
+                    }}>
+                        <span style={{ fontSize: '18px' }}>⚠️</span>
+                        <span style={{ flex: 1 }}>{stockWarning}</span>
+                        <button
+                            onClick={() => setStockWarning('')}
+                            style={{ background: 'none', border: 'none', color: '#fca5a5', cursor: 'pointer', fontSize: '16px', padding: '0 4px' }}
+                        >✕</button>
+                    </div>
+                )}
+
                 <div className="controls-area">
                     <div className="status-badge" data-status={status}>
                         <div className={`status-dot ${status === 'speaking' || status === 'ai_speaking' ? 'pulse-animation' : ''}`}></div>
@@ -380,7 +384,7 @@ function CallInterface({ callId, onEndCall }) {
                     </div>
 
                     <button className="btn-end" onClick={onEndCall}>
-                        End Call
+                        End Session
                     </button>
                 </div>
             </div>

@@ -8,7 +8,7 @@ import shutil
 import json
 import uuid
 import os
-from fastapi import FastAPI, UploadFile, File, WebSocket
+from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
@@ -22,6 +22,7 @@ from db import (
     get_orders_by_user, update_order_status, add_product,
     update_product, delete_product, delete_order, save_cart
 )
+from ws_manager import admin_ws_manager
 
 # Load environment variables
 load_dotenv()
@@ -93,42 +94,96 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
     await websocket.accept()
     try:
         while True:
-            audio_data = await websocket.receive_bytes()
-            
+            try:
+                data = await websocket.receive()
+            except WebSocketDisconnect:
+                print(f"Client disconnected: {call_id}")
+                break
+            except Exception as e:
+                print(f"WebSocket Receive Error: {e}")
+                break  # break, not continue — socket is broken
+
+            text_input = ""
+            audio_data = None
+
+            # Check for ASGI-level disconnect frame
+            if data.get("type") == "websocket.disconnect":
+                print(f"Client disconnected (frame): {call_id}")
+                break
+
+            # Route: binary audio OR text JSON
+            if 'bytes' in data and data['bytes']:
+                audio_data = data['bytes']
+            elif 'text' in data and data['text']:
+                try:
+                    json_data = json.loads(data['text'])
+                    if json_data.get('type') == 'text':
+                        text_input = json_data.get('text', '')
+                except Exception as je:
+                    print(f"JSON parse error: {je}")
+
+            if not text_input and not audio_data:
+                continue
+
             # Context Preparation
             base_context = inventory.get_context()
-            
-            # Personalization
-            user_context = ""
+
+            # Personalization — always provide Guest defaults so AI knows what's missing
+            user_context = "User Name: Guest\nUser Address: Unknown\n"
             user_phone = call_sessions.get(call_id)
             if user_phone:
                 u = get_user(user_phone)
                 c = get_cart(user_phone)
                 if u:
-                    user_context += f"User Name: {u['name'] or 'Guest'}\nUser Address: {u['address'] or 'Unknown'}\n"
+                    user_context = f"User Name: {u['name'] or 'Guest'}\nUser Address: {u['address'] or 'Unknown'}\n"
                 if c:
                     cart_summary = ", ".join([f"{item['qty']}x {item['name']}" for item in c])
                     user_context += f"Previous Cart: {cart_summary}\n"
-            
-            final_context = (user_context + "\n" + base_context) if user_context else base_context
-            
-            result = await gemini.process_audio(call_id, audio_data, final_context, user_id=user_phone)
+
+            final_context = user_context + "\n" + base_context
+
+            if audio_data:
+                result = await gemini.process_audio(call_id, audio_data, final_context, user_id=user_phone)
+            else:
+                result = await gemini.process_text(call_id, text_input, final_context, user_id=user_phone)
             
             if result:
-                # Send transcripts first
+                # ── PHASE 1: Send text instantly (sub-second) ──
                 if result.get("user_transcript"):
                     await websocket.send_json({"type": "transcript", "role": "user", "text": result["user_transcript"]})
                 
                 if result.get("ai_text"):
                     await websocket.send_json({"type": "transcript", "role": "ai", "text": result["ai_text"]})
                 
-                # Send cart updates
                 if result.get("cart") is not None:
                     await websocket.send_json({"type": "cart", "cart": result["cart"]})
 
-                # Send audio
-                if result.get("audio"):
-                    await websocket.send_bytes(result["audio"])
+                # ── STOCK GUARD: Notify frontend if quantities were clamped ──
+                violations = result.get("stock_violations", [])
+                if violations:
+                    warn_parts = []
+                    for v in violations:
+                        if v['available'] == 0:
+                            warn_parts.append(f"{v['name']} is out of stock and was removed from your cart.")
+                        else:
+                            warn_parts.append(
+                                f"Only {v['available']} unit(s) of {v['name']} available. "
+                                f"Your cart has been updated to {v['available']}."
+                            )
+                    warning_text = " ".join(warn_parts)
+                    await websocket.send_json({
+                        "type": "stock_warning",
+                        "text": warning_text,
+                        "violations": violations
+                    })
+
+                # ── PHASE 2: Generate FULL TTS audio (Ensures clarity & natural flow) ──
+                from services import GeminiService
+                ai_audio = result.get("ai_audio", "") or result.get("ai_text", "")
+                if ai_audio:
+                    audio_bytes = await GeminiService.generate_tts(ai_audio)
+                    if audio_bytes:
+                        await websocket.send_bytes(audio_bytes)
                 
                 # Check for termination signal
                 if result.get("terminate"):
@@ -144,6 +199,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                         ai_interpretation=result.get("ai_text", ""),
                         action_performed=action_perf
                     )
+                    await admin_ws_manager.broadcast({"type": "VOICE_LOG_UPDATED"})
             else:
                 # Error Case: Unblock Frontend
                 await websocket.send_json({"type": "error", "text": "Sorry, I encountered an error. Please try again."})
@@ -160,24 +216,32 @@ async def get_all_products():
 @app.post("/api/products")
 async def create_product(product: dict):
     """Add new product"""
-    return add_product(product)
+    res = add_product(product)
+    await admin_ws_manager.broadcast({"type": "INVENTORY_UPDATED"})
+    return res
 
 @app.put("/api/products/{product_id}")
 async def update_product_endpoint(product_id: int, data: dict):
     """Update product (stock, price, image)"""
-    return update_product(product_id, data)
+    res = update_product(product_id, data)
+    await admin_ws_manager.broadcast({"type": "INVENTORY_UPDATED"})
+    return res
 
 @app.delete("/api/products/{product_id}")
 async def delete_product_endpoint(product_id: int):
     """Delete a product"""
-    return delete_product(product_id)
+    res = delete_product(product_id)
+    await admin_ws_manager.broadcast({"type": "INVENTORY_UPDATED"})
+    return res
 
 # ─── Orders ──────────────────────────────────────────────────
 
 @app.post("/api/order/confirm")
 async def confirm_order(order_data: dict):
     """Confirm and save order"""
-    return orders.create_order(order_data)
+    res = orders.create_order(order_data) # wait, the file doesn't have orders globally, it imports get_recent_orders etc. Wait, look at line 183 "orders.create_order(order_data)"
+    await admin_ws_manager.broadcast({"type": "NEW_ORDER"})
+    return res
 
 @app.get("/api/orders")
 async def get_orders_handler():
@@ -193,12 +257,16 @@ async def get_user_orders(phone: str):
 async def update_status(order_id: int, status_data: dict):
     """Update order status (e.g. delivered)"""
     new_status = status_data.get('status')
-    return update_order_status(order_id, new_status)
+    res = update_order_status(order_id, new_status)
+    await admin_ws_manager.broadcast({"type": "ORDER_UPDATED"})
+    return res
 
 @app.delete("/api/orders/{order_id}")
 async def delete_order_endpoint(order_id: int):
     """Delete order"""
-    return delete_order(order_id)
+    res = delete_order(order_id)
+    await admin_ws_manager.broadcast({"type": "ORDER_UPDATED"})
+    return res
 
 # ─── Cart ────────────────────────────────────────────────────
 
@@ -239,14 +307,29 @@ async def fetch_top_products():
 async def fetch_voice_logs():
     return get_voice_logs(limit=20)
 
+@app.websocket("/api/admin/ws")
+async def admin_websocket(websocket: WebSocket):
+    await admin_ws_manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+    except Exception as e:
+        pass
+    finally:
+        admin_ws_manager.disconnect(websocket)
+
 # ─── Uploads ─────────────────────────────────────────────────
 
 @app.post("/api/upload")
 async def upload_image(file: UploadFile = File(...)):
-    """Upload product image"""
-    file_location = f"static/images/{file.filename}"
+    """Upload product image with unique filename to prevent overwrites"""
+    ext = os.path.splitext(file.filename)[1]
+    unique_name = f"{uuid.uuid4()}{ext}"
+    file_location = f"static/images/{unique_name}"
+    
     with open(file_location, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+    
     return {"url": f"http://localhost:8000/{file_location}"}
 
 # ─── Entry Point ─────────────────────────────────────────────

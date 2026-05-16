@@ -12,6 +12,7 @@ import RecentOrders from './RecentOrders';
 import LowStockProducts from './LowStockProducts';
 import TopProducts from './TopProducts';
 import VoiceLogs from './VoiceLogs';
+import { useAdminWebSocket } from '../hooks/useAdminWebSocket';
 
 function AnalyticsDashboard() {
     const [data, setData] = useState({
@@ -23,6 +24,12 @@ function AnalyticsDashboard() {
         orders_last_7_days: []
     });
     const [loading, setLoading] = useState(true);
+
+    useAdminWebSocket((event) => {
+        if (['NEW_ORDER', 'ORDER_UPDATED', 'INVENTORY_UPDATED'].includes(event.type)) {
+            fetchAnalytics();
+        }
+    });
 
     useEffect(() => {
         fetchAnalytics();
@@ -54,12 +61,12 @@ function AnalyticsDashboard() {
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px', marginBottom: '30px' }}>
                 <div className="metric-card">
-                    <h4>Orders Today</h4>
+                    <h4>Total Orders</h4>
                     <div className="metric-value">{data.orders_today}</div>
                 </div>
 
                 <div className="metric-card">
-                    <h4>Revenue Today</h4>
+                    <h4>Total Revenue</h4>
                     <div className="metric-value">₹{data.revenue_today.toFixed(2)}</div>
                 </div>
 

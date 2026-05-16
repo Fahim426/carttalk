@@ -42,7 +42,7 @@ function ProductGrid({ searchQuery = '' }) {
     }, {});
 
     // Sort categories
-    const categoryOrder = ['Fruits', 'Vegetables', 'Dairy', 'Cereals', 'Spices', 'Meat', 'Oils', 'Pantry', 'Beverages', 'Others'];
+    const categoryOrder = ['Grains', 'Fruits', 'Vegetables', 'Dairy', 'Cereals', 'Spices', 'Meat', 'Oils', 'Pantry', 'Beverages', 'Others'];
     const sortedCategories = Object.keys(groupedProducts).sort((a, b) => {
         const indexA = categoryOrder.indexOf(a);
         const indexB = categoryOrder.indexOf(b);
@@ -90,7 +90,7 @@ function ProductGrid({ searchQuery = '' }) {
 
                             <div className="card-details">
                                 <h3 className="product-name">{product.name_en}</h3>
-                                <p className="product-subtitle">{product.category?.toLowerCase() || 'fresh'} (loose), 1 kg</p>
+                                <p className="product-subtitle">{product.category || 'Fresh'}</p>
 
                                 <div className="card-bottom">
                                     <span className="price">₹{product.price}</span>

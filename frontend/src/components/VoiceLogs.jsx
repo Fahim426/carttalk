@@ -1,8 +1,16 @@
 import React, { useState, useEffect } from 'react';
 
+import { useAdminWebSocket } from '../hooks/useAdminWebSocket';
+
 function VoiceLogs() {
     const [logs, setLogs] = useState([]);
     const [loading, setLoading] = useState(true);
+
+    useAdminWebSocket((event) => {
+        if (event.type === 'VOICE_LOG_UPDATED') {
+            fetchVoiceLogs();
+        }
+    });
 
     useEffect(() => {
         fetchVoiceLogs();
